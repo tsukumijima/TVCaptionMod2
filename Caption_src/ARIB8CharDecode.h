@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include <string>
+#include <utility>
 #include <vector>
 using std::wstring;
 using std::vector;
@@ -22,6 +23,8 @@ using std::vector;
 #define MF_PROP_HIRA  0x37 //プロポーショナル平仮名
 #define MF_PROP_KANA  0x38 //プロポーショナル片仮名
 #define MF_JISX_KANA 0x49 //JIX X0201片仮名
+#define MF_LATIN_EXTENSION 0x4B //ラテン文字拡張
+#define MF_LATIN_SPECIAL 0x4C //ラテン文字特殊
 //DRCS
 #define MF_DRCS_0 0x40 //DRCS-0
 #define MF_DRCS_1 0x41 //DRCS-1
@@ -93,6 +96,8 @@ struct DRCS_PATTERN{
 
 //参考:up0511mod
 //U+EC00～U+ECFFの範囲でDRCSをUCSにマッピングする
+//DRCSがすでにUCSの私用領域(U+EC00～U+EFFF)ならそのまま返す
+//BMPの私用領域はU+F8FFまであるが、一部のフォントが後方領域を外字に使うことから範囲を制限する
 class CDRCMap
 {
 	int m_used, m_front;
@@ -109,7 +114,8 @@ class CARIB8CharDecode
 public:
 	CARIB8CharDecode(void);
 	//字幕を想定したワイド文字列への変換
-	BOOL Caption( const BYTE* pbSrc, DWORD dwSrcSize, vector<CAPTION_DATA>* pCaptionList, CDRCMap* pDRCMap, WORD wInitSWFMode );
+	BOOL Caption( const BYTE* pbSrc, DWORD dwSrcSize, vector<CAPTION_DATA>* pCaptionList,
+	              CDRCMap* pDRCMap, WORD wInitSWFMode, const char* pszLang, BOOL bUCS );
 	//DRCSヘッダの分析(参考:mark10als)
 	static BOOL DRCSHeaderparse( const BYTE* pbSrc, DWORD dwSrcSize, vector<DRCS_PATTERN>* pDRCList, BOOL bDRCS_0 );
 	BOOL GetGaijiTable(WCHAR* pTable, DWORD* pdwTableSize) const;
@@ -157,6 +163,10 @@ protected:
 
 	//表示書式(運用規定で960x540または720x480)
 	WORD m_wSWFMode;
+	//ラテン文字(SBTVD)かどうか
+	BOOL m_bLatin;
+	//符号化方式がUCSかどうか
+	BOOL m_bUCS;
 	//初期化動作時の表示書式
 	WORD m_wInitSWFMode;
 	//表示領域の位置(字幕プレーン左上角からの座標)
@@ -184,11 +194,15 @@ protected:
 	vector<CAPTION_DATA>* m_pCaptionList;
 	CDRCMap* m_pDRCMap;
 	WCHAR m_GaijiTable[G_CELL_SIZE * 7][2];
+	//UCSコードポイントを8単位符号の追加記号集合に変換するテーブル
+	std::pair<int, int> m_UCSToGaijiTable[G_CELL_SIZE * 7];
 
 	static const WCHAR AsciiTable[94];
 	static const WCHAR HiraTable[94];
 	static const WCHAR KanaTable[94];
 	static const WCHAR JisXKanaTable[94];
+	static const WCHAR LatinExtensionTable[94];
+	static const WCHAR LatinSpecialTable[94];
 	static const BYTE DefaultMacro[16][20];
 protected:
 	BOOL InitCaption(void);
@@ -203,6 +217,7 @@ protected:
 	BOOL C0( const BYTE* pbSrc, DWORD dwSrcSize, DWORD* pdwReadSize );
 	BOOL C1( const BYTE* pbSrc, DWORD dwSrcSize, DWORD* pdwReadSize );
 	BOOL GL_GR( const BYTE* pbSrc, DWORD dwSrcSize, DWORD* pdwReadSize, const MF_MODE* mode );
+	BOOL G_UCS( const BYTE* pbSrc, DWORD dwSrcSize, DWORD* pdwReadSize );
 	//エスケープシーケンス
 	BOOL ESC( const BYTE* pbSrc, DWORD dwSrcSize, DWORD* pdwReadSize );
 	//JIS->SJIS変換

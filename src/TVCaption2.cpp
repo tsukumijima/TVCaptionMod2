@@ -1,5 +1,5 @@
 ﻿// TVTestに字幕を表示するプラグイン(based on TVCaption 2008-12-16 by odaru)
-// 最終更新: 2021-05-08
+// 最終更新: 2022-01-15
 // 署名: xt(849fa586809b0d16276cd644c6749503)
 #include <Windows.h>
 #include <memory>
@@ -31,7 +31,7 @@
 #define WM_RESET_OSDS           (WM_APP + 4)
 
 static const LPCTSTR INFO_PLUGIN_NAME = TEXT("TVCaptionMod2");
-static const LPCTSTR INFO_DESCRIPTION = TEXT("字幕を表示 (ver.2.4; based on TVCaption081216 by odaru)");
+static const LPCTSTR INFO_DESCRIPTION = TEXT("字幕を表示 (ver.2.5; based on TVCaption081216 by odaru)");
 static const int INFO_VERSION = 14;
 static const LPCTSTR TV_CAPTION2_WINDOW_CLASS = TEXT("TVTest TVCaption2");
 
@@ -981,8 +981,8 @@ void CTVCaption2::DestroyOsds()
     DeleteTextures();
 }
 
-static void AddOsdText(CPseudoOSD *pOsd, LPCTSTR text, int width, int charWidth, int charHeight,
-                       const RECT &rcFontAdjust, LPCTSTR faceName, const CAPTION_CHAR_DATA_DLL &style)
+void CTVCaption2::AddOsdText(CPseudoOSD *pOsd, LPCTSTR text, int width, int charWidth, int charHeight,
+                             const RECT &rcFontAdjust, LPCTSTR faceName, const CAPTION_CHAR_DATA_DLL &style) const
 {
     LOGFONT logFont;
     logFont.lfHeight         = -charHeight;
@@ -1000,7 +1000,7 @@ static void AddOsdText(CPseudoOSD *pOsd, LPCTSTR text, int width, int charWidth,
     logFont.lfPitchAndFamily = (faceName[0]?DEFAULT_PITCH:FIXED_PITCH) | FF_DONTCARE;
     _tcscpy_s(logFont.lfFaceName, faceName);
     RECT rc = {charHeight * rcFontAdjust.left / 72, charHeight * rcFontAdjust.top / 72, rcFontAdjust.right * rcFontAdjust.bottom / 100, rcFontAdjust.right};
-    pOsd->AddText(text, width, logFont, rc);
+    pOsd->AddText(text, width, logFont, m_fEnTextColor ? m_textColor : RGB(style.stCharColor.ucR, style.stCharColor.ucG, style.stCharColor.ucB), rc);
 }
 
 // 利用可能なOSDを1つだけ用意する
@@ -1013,8 +1013,7 @@ CPseudoOSD &CTVCaption2::CreateOsd(STREAM_INDEX index, HWND hwndContainer, int c
     }
     CPseudoOSD &osd = *m_pOsdList[index][m_osdShowCount[index] + m_osdPrepareCount[index]++];
     osd.ClearText();
-    osd.SetTextColor(m_fEnTextColor ? m_textColor : RGB(style.stCharColor.ucR, style.stCharColor.ucG, style.stCharColor.ucB),
-                     m_fEnBackColor ? m_backColor : RGB(style.stBackColor.ucR, style.stBackColor.ucG, style.stBackColor.ucB));
+    osd.SetBackgroundColor(m_fEnBackColor ? m_backColor : RGB(style.stBackColor.ucR, style.stBackColor.ucG, style.stBackColor.ucB));
 
     int textOpacity = m_textOpacity>=0 ? min(m_textOpacity,100) : style.stCharColor.ucAlpha*100/255;
     int backOpacity = !m_fProfileC && style.stBackColor.ucAlpha==0 ? 0 :
@@ -1202,7 +1201,7 @@ void CTVCaption2::ShowCaptionData(STREAM_INDEX index, const CAPTION_DATA_DLL &ca
         WCHAR szHalf[2] = {};
         if (drcsCount != 0 || fSearchGaiji || fSearchHalf) {
             for (int j = 0; pszShow[j]; ++j) {
-                if (0xEC00 <= pszShow[j] && pszShow[j] <= 0xECFF) {
+                if (0xEC00 <= pszShow[j] && pszShow[j] <= 0xEFFF) {
                     // DRCS
                     for (DWORD k = 0; k < drcsCount; ++k) {
                         if (pDrcsList[k].dwUCS == pszShow[j]) {
@@ -1282,7 +1281,7 @@ void CTVCaption2::ShowCaptionData(STREAM_INDEX index, const CAPTION_DATA_DLL &ca
                 charData.bFlushMode == nextCharData.bFlushMode &&
                 charData.bHLC == nextCharData.bHLC &&
                 charData.bORN == nextCharData.bORN &&
-                charData.stCharColor == nextCharData.stCharColor &&
+                charData.stCharColor.ucAlpha == nextCharData.stCharColor.ucAlpha &&
                 charData.stBackColor == nextCharData.stBackColor)
             {
                 fSameStyle = true;
@@ -1378,7 +1377,7 @@ void CTVCaption2::ShowCaptionData(STREAM_INDEX index, const CAPTION_DATA_DLL &ca
                     ::SetDIBits(nullptr, hbm, 0, bmi.bmiHeader.biHeight, pDrcs->pbBitmap, (BITMAPINFO*)&bmi, DIB_RGB_COLORS);
                     RECT rc;
                     ::SetRect(&rc, (int)((dirW-charW)/2*scaleX), (int)((dirH-charH)/2*scaleY), charScaleW, charScaleH);
-                    pOsdCarry->AddImage(hbm, (int)((posX+dirW)*scaleX) - (int)(posX*scaleX), rc);
+                    pOsdCarry->AddImage(hbm, (int)((posX+dirW)*scaleX) - (int)(posX*scaleX), RGB(charC.ucR, charC.ucG, charC.ucB), rc);
                     posX += dirW;
                 }
             }
@@ -1468,7 +1467,7 @@ LRESULT CALLBACK CTVCaption2::PaintingWndProc(HWND hwnd, UINT uMsg, WPARAM wPara
     case WM_RESET_CAPTION:
         pThis->HideAllOsds();
         {
-            CBlockLock lock(&pThis->m_streamLock);
+            lock_recursive_mutex lock(pThis->m_streamLock);
             if (wParam != 0) {
                 // ワンセグ字幕をすばやく表示するため
                 pThis->m_fProfileC = wParam != 1;
@@ -1517,7 +1516,7 @@ void CTVCaption2::ProcessCaption(CCaptionManager *pCaptionManager, const CAPTION
     STREAM_INDEX index = STREAM_CAPTION;
     DWORD pcr = 0;
     if (!pCaptionForTest) {
-        CBlockLock lock(&m_streamLock);
+        lock_recursive_mutex lock(m_streamLock);
         if (pCaptionManager->IsEmpty()) {
             // 次の字幕文を取得する
             pCaptionManager->Analyze(m_pcr);
@@ -1731,7 +1730,7 @@ void CTVCaption2::ProcessPacket(BYTE *pPacket)
         if (adapt.pcr_flag) {
             // 参照PIDのときはPCRを取得する
             if (header.pid == m_pcrPid) {
-                CBlockLock lock(&m_streamLock);
+                lock_recursive_mutex lock(m_streamLock);
                 DWORD pcr = (DWORD)adapt.pcr_45khz;
 
                 // PCRの連続性チェック
@@ -1798,11 +1797,11 @@ void CTVCaption2::ProcessPacket(BYTE *pPacket)
         !header.transport_error_indicator)
     {
         if (header.pid == m_caption1Pid) {
-            CBlockLock lock(&m_streamLock);
+            lock_recursive_mutex lock(m_streamLock);
             m_caption1Manager.AddPacket(pPacket);
         }
         else if (header.pid == m_caption2Pid) {
-            CBlockLock lock(&m_streamLock);
+            lock_recursive_mutex lock(m_streamLock);
             m_caption2Manager.AddPacket(pPacket);
         }
     }
