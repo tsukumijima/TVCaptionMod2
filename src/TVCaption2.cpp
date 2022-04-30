@@ -1,5 +1,5 @@
 ﻿// TVTestに字幕を表示するプラグイン(based on TVCaption 2008-12-16 by odaru)
-// 最終更新: 2022-01-15
+// 最終更新: 2022-04-13
 // 署名: xt(849fa586809b0d16276cd644c6749503)
 #include <Windows.h>
 #include <memory>
@@ -33,7 +33,7 @@ const UINT WM_APP_DONE_SIZE = WM_APP + 3;
 const UINT WM_APP_RESET_OSDS = WM_APP + 4;
 
 const TCHAR INFO_PLUGIN_NAME[] = TEXT("TVCaptionMod2");
-const TCHAR INFO_DESCRIPTION[] = TEXT("字幕を表示 (ver.2.5; based on TVCaption081216 by odaru)");
+const TCHAR INFO_DESCRIPTION[] = TEXT("字幕を表示 (ver.2.6; based on TVCaption081216 by odaru)");
 const int INFO_VERSION = 14;
 const TCHAR TV_CAPTION2_WINDOW_CLASS[] = TEXT("TVTest TVCaption2");
 
@@ -54,8 +54,8 @@ const CAPTION_DATA_DLL TESTCAP_LIST[] = {
     {FALSE,7,170,30,620,480,310,509,0,2,const_cast<CAPTION_CHAR_DATA_DLL*>(&TESTCAP_CHAR_LIST[5]),0},
 };
 
-const TCHAR ROMSOUND_EXAMPLE[] = TEXT(";!SystemExclamation:01:02:03:04:05:06:07:08:09:10:11:12:13:14:15:!SystemAsterisk::");
-const TCHAR ROMSOUND_ENABLED[] = TEXT("00:01:02:03:04:05:06:07:08:09:10:11:12:13:14:15:16:17:18");
+const TCHAR ROMSOUND_ROM_ENABLED[] = TEXT("!00:!01:!02:!03:!04:!05:!06:!07:!08:!09:!10:!11:!12:!13:!14:!15:::");
+const TCHAR ROMSOUND_CUST_ENABLED[] = TEXT("00:01:02:03:04:05:06:07:08:09:10:11:12:13:14:15:16:17:18");
 
 // 半角置換可能文字リスト
 // 記号はJISX0213 1面1区のうちグリフが用意されている可能性が十分高そうなものだけ
@@ -346,6 +346,22 @@ bool CTVCaption2::GetVideoContainerLayout(HWND hwndContainer, RECT *pRect, RECT 
 }
 
 
+// 字幕の表示方法に応じて映像サイズまたはGetVideoContainerLayout()の結果を得る
+bool CTVCaption2::GetVideoSurfaceRect(HWND hwndContainer, RECT *pVideoRect, RECT *pExVideoRect)
+{
+    if (m_paintingMethod == 3) {
+        RECT rc;
+        if (m_osdCompositor.GetSurfaceRect(&rc)) {
+            // 位置はわからないが正確な映像サイズを得た
+            if (pVideoRect) *pVideoRect = rc;
+            if (pExVideoRect) *pExVideoRect = rc;
+            return true;
+        }
+    }
+    return GetVideoContainerLayout(hwndContainer, nullptr, pVideoRect, pExVideoRect);
+}
+
+
 // 映像PIDを取得する(無い場合は-1)
 // プラグインAPIが内部でストリームをロックするので、デッドロックを完成させないように注意
 int CTVCaption2::GetVideoPid()
@@ -542,8 +558,8 @@ void CTVCaption2::LoadSettings()
     m_rcGaijiAdjust.top = GetBufferedProfileInt(buf, TEXT("GaijiFontYAdjust"), 0);
     m_rcGaijiAdjust.right = GetBufferedProfileInt(buf, TEXT("GaijiFontSizeAdjust"), 100);
     m_rcGaijiAdjust.bottom = GetBufferedProfileInt(buf, TEXT("GaijiFontRatioAdjust"), 100);
-    m_strokeWidth       = GetBufferedProfileInt(buf, TEXT("StrokeWidth"), -3);
-    m_ornStrokeWidth    = GetBufferedProfileInt(buf, TEXT("OrnStrokeWidth"), 5);
+    m_strokeWidth       = GetBufferedProfileInt(buf, TEXT("StrokeWidth"), -2);
+    m_ornStrokeWidth    = GetBufferedProfileInt(buf, TEXT("OrnStrokeWidth"), 4);
     m_strokeSmoothLevel = GetBufferedProfileInt(buf, TEXT("StrokeSmoothLevel"), 1);
     m_strokeByDilate    = GetBufferedProfileInt(buf, TEXT("StrokeByDilate"), 22);
     m_paddingWidth      = GetBufferedProfileInt(buf, TEXT("PaddingWidth"), 0);
@@ -554,7 +570,7 @@ void CTVCaption2::LoadSettings()
     m_fShrinkSDScale    = GetBufferedProfileInt(buf, TEXT("ShrinkSDScale"), 0) != 0;
     m_adjustViewX       = GetBufferedProfileInt(buf, TEXT("ViewXAdjust"), 0);
     m_adjustViewY       = GetBufferedProfileInt(buf, TEXT("ViewYAdjust"), 0);
-    GetBufferedProfileString(buf, TEXT("RomSoundList"), ROMSOUND_EXAMPLE, val, _countof(val));
+    GetBufferedProfileString(buf, TEXT("RomSoundList"), TEXT(""), val, _countof(val));
     m_romSoundList = val;
 
     m_fEnTextColor = textColor >= 0;
@@ -690,6 +706,22 @@ bool CTVCaption2::PlayRomSound(int index) const
 
     if (!id.empty() && id[0] == TEXT('!')) {
         // 定義済みのサウンド
+        if (id.size() == 3) {
+            LPCTSTR romFound = _tcsstr(ROMSOUND_ROM_ENABLED, id.c_str());
+            if (romFound) {
+                // 組み込みサウンド
+                size_t romIndex = (romFound - ROMSOUND_ROM_ENABLED) / 4;
+                // 今のところ2～4は組み込んでいないので1とみなす
+                if (2 <= romIndex && romIndex <= 4) {
+                    romIndex = 1;
+                }
+                if (romIndex <= 13) {
+                    return ::PlaySound(MAKEINTRESOURCE(IDW_ROM_00 + romIndex), g_hinstDLL,
+                                       SND_ASYNC|SND_NODEFAULT|SND_RESOURCE) != FALSE;
+                }
+                return false;
+            }
+        }
         return ::PlaySound(&id.c_str()[1], nullptr, SND_ASYNC|SND_NODEFAULT|SND_ALIAS) != FALSE;
     }
     else if (!id.empty()) {
@@ -825,8 +857,8 @@ void CTVCaption2::OnCapture(bool fSaveToFile)
                 }
             }
 
-            RECT rc, rcVideo;
-            if (GetVideoContainerLayout(m_hwndContainer, &rc, &rcVideo)) {
+            RECT rcVideo;
+            if (GetVideoContainerLayout(m_hwndContainer, nullptr, &rcVideo)) {
                 BITMAPINFOHEADER bihRes = bih;
                 bihRes.biWidth = rcVideo.right - rcVideo.left;
                 bihRes.biHeight = rcVideo.bottom - rcVideo.top;
@@ -1580,8 +1612,8 @@ void CTVCaption2::ProcessCaption(CCaptionManager *pCaptionManager, const CAPTION
                 m_shiftSmallState[index] = SHIFT_SMALL_STATE();
             }
             else {
-                RECT rcVideo;
-                if (GetVideoContainerLayout(m_hwndContainer, nullptr, nullptr, &rcVideo)) {
+                RECT rcExVideo;
+                if (GetVideoSurfaceRect(m_hwndContainer, nullptr, &rcExVideo)) {
                     const DRCS_PATTERN_DLL *pDrcsList = nullptr;
                     DWORD drcsCount = 0;
                     if (!pCaptionForTest) {
@@ -1605,7 +1637,7 @@ void CTVCaption2::ProcessCaption(CCaptionManager *pCaptionManager, const CAPTION
                             }
                         }
                     }
-                    ShowCaptionData(index, *pCaption, pDrcsList, drcsCount, m_shiftSmallState[index], m_hwndContainer, rcVideo);
+                    ShowCaptionData(index, *pCaption, pDrcsList, drcsCount, m_shiftSmallState[index], m_hwndContainer, rcExVideo);
                 }
             }
         }
@@ -1639,7 +1671,7 @@ void CTVCaption2::ProcessCaption(CCaptionManager *pCaptionManager, const CAPTION
                 int left, top;
                 m_pOsdList[index][m_osdShowCount[index]]->GetPosition(&left, &top, nullptr, nullptr);
                 RECT rcVideo;
-                if (GetVideoContainerLayout(m_hwndContainer, nullptr, &rcVideo)) {
+                if (GetVideoSurfaceRect(m_hwndContainer, &rcVideo)) {
                     // 疑似OSD系から逆変換
                     left -= rcVideo.left;
                     top -= rcVideo.top;
@@ -1669,9 +1701,9 @@ void CTVCaption2::ProcessCaption(CCaptionManager *pCaptionManager, const CAPTION
 
 void CTVCaption2::OnSize(STREAM_INDEX index)
 {
-    if (m_osdShowCount[index] > 0) {
+    if (m_paintingMethod != 3 && m_osdShowCount[index] > 0) {
         RECT rc;
-        if (GetVideoContainerLayout(m_hwndContainer, &rc, nullptr)) {
+        if (GetVideoContainerLayout(m_hwndContainer, &rc)) {
             // とりあえずはみ出ないようにする
             for (size_t i = 0; i < m_osdShowCount[index]; ++i) {
                 int left, top, width, height;
@@ -1962,7 +1994,10 @@ void CTVCaption2::InitializeSettingsDlg(HWND hDlg)
     ::CheckDlgButton(hDlg, IDC_CHECK_SHRINK_SD_SCALE, m_fShrinkSDScale ? BST_CHECKED : BST_UNCHECKED);
     ::SetDlgItemInt(hDlg, IDC_EDIT_ADJUST_VIEW_X, m_adjustViewX, TRUE);
     ::SetDlgItemInt(hDlg, IDC_EDIT_ADJUST_VIEW_Y, m_adjustViewY, TRUE);
-    ::CheckDlgButton(hDlg, IDC_CHECK_ROMSOUND, !m_romSoundList.empty() && m_romSoundList[0] != TEXT(';') ? BST_CHECKED : BST_UNCHECKED);
+    bool fCheckRomSound = !m_romSoundList.empty() && m_romSoundList[0] != TEXT(';');
+    ::CheckDlgButton(hDlg, IDC_CHECK_ROMSOUND, fCheckRomSound ? BST_CHECKED : BST_UNCHECKED);
+    ::EnableWindow(::GetDlgItem(hDlg, IDC_CHECK_CUST_ROMSOUND), fCheckRomSound);
+    ::CheckDlgButton(hDlg, IDC_CHECK_CUST_ROMSOUND, fCheckRomSound && m_romSoundList != ROMSOUND_ROM_ENABLED ? BST_CHECKED : BST_UNCHECKED);
 
     ::RemoveProp(hDlg, TEXT("Ini"));
 }
@@ -2219,7 +2254,13 @@ INT_PTR CTVCaption2::ProcessSettingsDlg(HWND hDlg, UINT uMsg, WPARAM wParam, LPA
             }
             break;
         case IDC_CHECK_ROMSOUND:
-            m_romSoundList = ::IsDlgButtonChecked(hDlg, IDC_CHECK_ROMSOUND) != BST_UNCHECKED ? ROMSOUND_ENABLED : ROMSOUND_EXAMPLE;
+            ::EnableWindow(::GetDlgItem(hDlg, IDC_CHECK_CUST_ROMSOUND),
+                           ::IsDlgButtonChecked(hDlg, IDC_CHECK_ROMSOUND) != BST_UNCHECKED);
+            // FALL THROUGH!
+        case IDC_CHECK_CUST_ROMSOUND:
+            m_romSoundList = ::IsDlgButtonChecked(hDlg, IDC_CHECK_ROMSOUND) == BST_UNCHECKED ? TEXT("") :
+                             ::IsDlgButtonChecked(hDlg, IDC_CHECK_CUST_ROMSOUND) != BST_UNCHECKED ? ROMSOUND_CUST_ENABLED :
+                             ROMSOUND_ROM_ENABLED;
             fSave = true;
             break;
         default:
