@@ -9,6 +9,9 @@
 #define IDB_SWITCH_SETTING                      112
 #define IDW_ROM_00                              150
 #define IDW_ROM_01                              151
+#define IDW_ROM_02                              152
+#define IDW_ROM_03                              153
+#define IDW_ROM_04                              154
 #define IDW_ROM_05                              155
 #define IDW_ROM_06                              156
 #define IDW_ROM_07                              157

@@ -715,10 +715,6 @@ bool CTVCaption2::PlayRomSound(int index) const
             if (romFound) {
                 // 組み込みサウンド
                 size_t romIndex = (romFound - ROMSOUND_ROM_ENABLED) / 4;
-                // 今のところ2～4は組み込んでいないので1とみなす
-                if (2 <= romIndex && romIndex <= 4) {
-                    romIndex = 1;
-                }
                 if (romIndex <= 13) {
                     return ::PlaySound(MAKEINTRESOURCE(IDW_ROM_00 + romIndex), g_hinstDLL,
                                        SND_ASYNC|SND_NODEFAULT|SND_RESOURCE) != FALSE;
