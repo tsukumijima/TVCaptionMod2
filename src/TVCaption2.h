@@ -63,12 +63,13 @@ private:
     void DeleteTextures();
     void HideAllOsds();
     void DestroyOsds();
-    void AddOsdText(CPseudoOSD *pOsd, LPCTSTR text, int width, int charWidth, int charHeight,
+    void AddOsdText(CPseudoOSD *pOsd, LPCTSTR text, int width, int originalWidth, int charWidth, int charHeight,
                     const RECT &rcFontAdjust, LPCTSTR faceName, const CAPTION_CHAR_DATA_DLL &style) const;
     CPseudoOSD &CreateOsd(STREAM_INDEX index, HWND hwndContainer, int charHeight, int nomalHeight, const CAPTION_CHAR_DATA_DLL &style);
     void DryrunCaptionData(const CAPTION_DATA_DLL &caption, SHIFT_SMALL_STATE &ssState);
     void SetOsdWindowOffsetAndScale(CPseudoOSD *pOsd, const RECT &rcVideo) const;
-    void ShowCaptionData(STREAM_INDEX index, const CAPTION_DATA_DLL &caption, const DRCS_PATTERN_DLL *pDrcsList, DWORD drcsCount,
+    void ShowCaptionData(STREAM_INDEX index, const CAPTION_DATA_DLL &caption, bool fLangCodeJpn,
+                         const DRCS_PATTERN_DLL *pDrcsList, DWORD drcsCount,
                          SHIFT_SMALL_STATE &ssState, HWND hwndContainer, const RECT &rcVideo);
     static LRESULT CALLBACK PaintingWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
     void ProcessCaption(CCaptionManager *pCaptionManager, const CAPTION_DATA_DLL *pCaptionForTest = nullptr);
@@ -87,6 +88,10 @@ private:
     tstring m_iniPath;
     tstring m_captureFolder;
     tstring m_captureFileName;
+    tstring m_captureFileNameFormat;
+    TCHAR m_szCaptureSaveFormat[8];
+    int m_jpegQuality;
+    int m_pngCompressionLevel;
     TCHAR m_szFaceName[LF_FACESIZE];
     TCHAR m_szGaijiFaceName[LF_FACESIZE];
     TCHAR m_szGaijiTableName[LF_FACESIZE];
@@ -120,6 +125,9 @@ private:
     int m_adjustViewY;
     tstring m_romSoundList;
     bool m_fInitializeSettingsDlg;
+
+    // キャプチャ
+    HMODULE m_hTVTestImage;
 
     // 字幕描画
     HWND m_hwndPainting;

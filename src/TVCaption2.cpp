@@ -1,5 +1,5 @@
 ﻿// TVTestに字幕を表示するプラグイン(based on TVCaption 2008-12-16 by odaru)
-// 最終更新: 2023-02-08
+// 最終更新: 2023-11-18
 // 署名: xt(849fa586809b0d16276cd644c6749503)
 #include <Windows.h>
 #include <memory>
@@ -33,8 +33,8 @@ const UINT WM_APP_DONE_MOVE = WM_APP + 2;
 const UINT WM_APP_RESET_OSDS = WM_APP + 4;
 
 const TCHAR INFO_PLUGIN_NAME[] = TEXT("TVCaptionMod2");
-const TCHAR INFO_DESCRIPTION[] = TEXT("字幕を表示 (ver.2.8; based on TVCaption081216 by odaru)");
-const int INFO_VERSION = 15;
+const TCHAR INFO_DESCRIPTION[] = TEXT("字幕を表示 (ver.2.9; based on TVCaption081216 by odaru)");
+const int INFO_VERSION = 16;
 const TCHAR TV_CAPTION2_WINDOW_CLASS[] = TEXT("TVTest TVCaption2");
 
 // テスト字幕
@@ -78,7 +78,9 @@ enum {
 }
 
 CTVCaption2::CTVCaption2()
-    : m_settingsIndex(0)
+    : m_jpegQuality(0)
+    , m_pngCompressionLevel(0)
+    , m_settingsIndex(0)
     , m_paintingMethod(0)
     , m_fIgnorePts(false)
     , m_fEnTextColor(false)
@@ -101,6 +103,7 @@ CTVCaption2::CTVCaption2()
     , m_adjustViewX(0)
     , m_adjustViewY(0)
     , m_fInitializeSettingsDlg(false)
+    , m_hTVTestImage(nullptr)
     , m_hwndPainting(nullptr)
     , m_hwndContainer(nullptr)
     , m_fNeedtoShow(false)
@@ -113,6 +116,7 @@ CTVCaption2::CTVCaption2()
     , m_caption1Pid(-1)
     , m_caption2Pid(-1)
 {
+    m_szCaptureSaveFormat[0] = 0;
     m_szFaceName[0] = 0;
     m_szGaijiFaceName[0] = 0;
     m_szGaijiTableName[0] = 0;
@@ -461,11 +465,7 @@ bool CTVCaption2::EnablePlugin(bool fEnable)
     if (fEnable) {
         // 設定の読み込み
         LoadSettings();
-        int iniVer = ::GetPrivateProfileInt(TEXT("Settings"), TEXT("Version"), 0, m_iniPath.c_str());
-        if (iniVer < INFO_VERSION) {
-            // デフォルトの設定キーを出力するため
-            SaveSettings();
-        }
+
         if (m_captionDll.Initialize()) {
             if (!ConfigureGaijiTable(m_szGaijiTableName, &m_drcsStrMap, m_szGaijiFaceName[0] ? m_customGaijiTable : nullptr)) {
                 m_pApp->AddLog(L"外字テーブルの設定に失敗しました。");
@@ -511,6 +511,11 @@ bool CTVCaption2::EnablePlugin(bool fEnable)
         // 内蔵音再生停止
         ::PlaySound(nullptr, nullptr, 0);
 
+        if (m_hTVTestImage) {
+            ::FreeLibrary(m_hTVTestImage);
+            m_hTVTestImage = nullptr;
+        }
+
         m_captionDll.UnInitialize();
 
         m_pApp->SetPluginCommandState(ID_COMMAND_SWITCH_LANG, TVTest::PLUGIN_COMMAND_STATE_DISABLED);
@@ -525,11 +530,17 @@ void CTVCaption2::LoadSettings()
 {
     std::vector<TCHAR> vbuf = GetPrivateProfileSectionBuffer(TEXT("Settings"), m_iniPath.c_str());
     TCHAR val[SETTING_VALUE_MAX];
+    int iniVer = GetBufferedProfileInt(vbuf.data(), TEXT("Version"), 0);
     m_viewerClockEstimator.SetEnabled(GetBufferedProfileInt(vbuf.data(), TEXT("EstimateViewerDelay"), 1) != 0);
     GetBufferedProfileString(vbuf.data(), TEXT("CaptureFolder"), TEXT(""), val, _countof(val));
     m_captureFolder = val;
     GetBufferedProfileString(vbuf.data(), TEXT("CaptureFileName"), TEXT("Capture"), val, _countof(val));
     m_captureFileName = val;
+    GetBufferedProfileString(vbuf.data(), TEXT("CaptureFileNameFormat"), TEXT(""), val, _countof(val));
+    m_captureFileNameFormat = val;
+    GetBufferedProfileString(vbuf.data(), TEXT("CaptureSaveFormat"), TEXT("BMP"), m_szCaptureSaveFormat, _countof(m_szCaptureSaveFormat));
+    m_jpegQuality = GetBufferedProfileInt(vbuf.data(), TEXT("JpegQuality"), 90);
+    m_pngCompressionLevel = GetBufferedProfileInt(vbuf.data(), TEXT("PngCompressionLevel"), 6);
     m_settingsIndex = GetBufferedProfileInt(vbuf.data(), TEXT("SettingsIndex"), 0);
 
     // ここからはセクション固有
@@ -580,6 +591,11 @@ void CTVCaption2::LoadSettings()
     m_textColor = RGB(textColor/1000000%1000, textColor/1000%1000, textColor%1000);
     m_fEnBackColor = backColor >= 0;
     m_backColor = RGB(backColor/1000000%1000, backColor/1000%1000, backColor%1000);
+
+    if (iniVer < INFO_VERSION) {
+        // デフォルトの設定キーを出力するため
+        SaveSettings();
+    }
 }
 
 
@@ -591,6 +607,10 @@ void CTVCaption2::SaveSettings() const
     WritePrivateProfileInt(section, TEXT("EstimateViewerDelay"), m_viewerClockEstimator.GetEnabled(), m_iniPath.c_str());
     ::WritePrivateProfileString(section, TEXT("CaptureFolder"), m_captureFolder.c_str(), m_iniPath.c_str());
     ::WritePrivateProfileString(section, TEXT("CaptureFileName"), m_captureFileName.c_str(), m_iniPath.c_str());
+    ::WritePrivateProfileString(section, TEXT("CaptureFileNameFormat"), m_captureFileNameFormat.c_str(), m_iniPath.c_str());
+    ::WritePrivateProfileString(section, TEXT("CaptureSaveFormat"), m_szCaptureSaveFormat, m_iniPath.c_str());
+    WritePrivateProfileInt(section, TEXT("JpegQuality"), m_jpegQuality, m_iniPath.c_str());
+    WritePrivateProfileInt(section, TEXT("PngCompressionLevel"), m_pngCompressionLevel, m_iniPath.c_str());
     WritePrivateProfileInt(section, TEXT("SettingsIndex"), m_settingsIndex, m_iniPath.c_str());
 
     // ここからはセクション固有
@@ -717,16 +737,16 @@ bool CTVCaption2::PlayRomSound(int index) const
                 size_t romIndex = (romFound - ROMSOUND_ROM_ENABLED) / 4;
                 if (romIndex <= 13) {
                     return ::PlaySound(MAKEINTRESOURCE(IDW_ROM_00 + romIndex), g_hinstDLL,
-                                       SND_ASYNC|SND_NODEFAULT|SND_RESOURCE) != FALSE;
+                                       SND_ASYNC | SND_NODEFAULT | SND_RESOURCE) != FALSE;
                 }
                 return false;
             }
         }
-        return ::PlaySound(&id.c_str()[1], nullptr, SND_ASYNC|SND_NODEFAULT|SND_ALIAS) != FALSE;
+        return ::PlaySound(&id.c_str()[1], nullptr, SND_ASYNC | SND_NODEFAULT | SND_ALIAS) != FALSE;
     }
     else if (!id.empty()) {
         tstring path = m_iniPath.substr(0, m_iniPath.rfind(TEXT('.'))) + TEXT('\\') + id + TEXT(".wav");
-        return ::PlaySound(path.c_str(), nullptr, SND_ASYNC|SND_NODEFAULT|SND_FILENAME) != FALSE;
+        return ::PlaySound(path.c_str(), nullptr, SND_ASYNC | SND_NODEFAULT | SND_FILENAME) != FALSE;
     }
     return false;
 }
@@ -834,7 +854,7 @@ void CTVCaption2::OnCapture(bool fSaveToFile)
     if (!pPackDib) return;
 
     BITMAPINFOHEADER *pBih = static_cast<BITMAPINFOHEADER*>(pPackDib);
-    if (pBih->biWidth>0 && pBih->biHeight>0 && (pBih->biBitCount==24 || pBih->biBitCount==32)) {
+    if (pBih->biWidth > 0 && pBih->biHeight > 0 && (pBih->biBitCount == 24 || pBih->biBitCount == 32)) {
         // 常に24bitビットマップにする
         BITMAPINFOHEADER bih = *pBih;
         bih.biBitCount = 24;
@@ -847,10 +867,10 @@ void CTVCaption2::OnCapture(bool fSaveToFile)
             }
             else {
                 // 32-24bit変換
-                for (int y=0; y<bih.biHeight; ++y) {
-                    BYTE *pDest = static_cast<BYTE*>(pBits) + (bih.biWidth*3+3) / 4 * 4 * y;
+                for (int y = 0; y < bih.biHeight; ++y) {
+                    BYTE *pDest = static_cast<BYTE*>(pBits) + (bih.biWidth * 3 + 3) / 4 * 4 * y;
                     BYTE *pSrc = pBitmap + bih.biWidth * 4 * y;
-                    for (int x=0; x<bih.biWidth; ++x) {
+                    for (int x = 0; x < bih.biWidth; ++x) {
                         ::memcpy(&pDest[3 * x], &pSrc[4 * x], 3);
                     }
                 }
@@ -862,8 +882,8 @@ void CTVCaption2::OnCapture(bool fSaveToFile)
                 bihRes.biWidth = rcVideo.right - rcVideo.left;
                 bihRes.biHeight = rcVideo.bottom - rcVideo.top;
                 // キャプチャ画像が表示中の動画サイズと異なるときは動画サイズのビットマップに変換する
-                if (bih.biWidth < bihRes.biWidth-3 || bihRes.biWidth+3 < bih.biWidth ||
-                    bih.biHeight < bihRes.biHeight-3 || bihRes.biHeight+3 < bih.biHeight)
+                if (bih.biWidth < bihRes.biWidth - 3 || bihRes.biWidth + 3 < bih.biWidth ||
+                    bih.biHeight < bihRes.biHeight - 3 || bihRes.biHeight + 3 < bih.biHeight)
                 {
                     void *pBitsRes;
                     HBITMAP hbmRes = ::CreateDIBSection(nullptr, reinterpret_cast<BITMAPINFO*>(&bihRes), DIB_RGB_COLORS, &pBitsRes, nullptr, 0);
@@ -895,33 +915,58 @@ void CTVCaption2::OnCapture(bool fSaveToFile)
             }
 
             ::GdiFlush();
-            int sizeImage = (bih.biWidth*3+3) / 4 * 4 * bih.biHeight;
+            int sizeImage = (bih.biWidth * 3 + 3) / 4 * 4 * bih.biHeight;
             if (fSaveToFile) {
                 // ファイルに保存
                 if (!m_captureFolder.empty()) {
                     LPCTSTR sep = m_captureFolder.back() == TEXT('/') || m_captureFolder.back() == TEXT('\\') ? TEXT("") : TEXT("\\");
-                    SYSTEMTIME st;
-                    ::GetLocalTime(&st);
-                    TCHAR t[64];
-                    _stprintf_s(t, TEXT("%d%02d%02d-%02d%02d%02d"), st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-                    TCHAR ext[16] = TEXT(".bmp");
-                    for (int i = 1; i <= 10; ++i) {
+                    tstring fileName;
+                    if (!m_captureFileNameFormat.empty()) {
+                        // 現在のコンテキストでファイル名をフォーマット
+                        TVTest::VarStringFormatInfo info = {};
+                        info.Flags = TVTest::VAR_STRING_FORMAT_FLAG_FILENAME;
+                        info.pszFormat = m_captureFileNameFormat.c_str();
+                        if (m_pApp->FormatVarString(&info)) {
+                            fileName = info.pszResult;
+                            m_pApp->MemoryFree(info.pszResult);
+                        }
+                    }
+                    if (fileName.empty()) {
+                        SYSTEMTIME st;
+                        ::GetLocalTime(&st);
+                        TCHAR t[64];
+                        _stprintf_s(t, TEXT("%d%02d%02d-%02d%02d%02d"), st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+                        fileName = m_captureFileName + t;
+                    }
+                    LPCTSTR ext = !_tcsicmp(m_szCaptureSaveFormat, TEXT("JPEG")) ? TEXT(".jpg") :
+                                  !_tcsicmp(m_szCaptureSaveFormat, TEXT("PNG")) ? TEXT(".png") : TEXT(".bmp");
+                    TCHAR suffix[4] = {};
+                    bool fSaved = false;
+                    for (int i = 1; i <= 30; ++i) {
                         // ファイルがなければ書きこむ
-                        HANDLE hFile = ::CreateFile((m_captureFolder + sep + m_captureFileName + t + ext).c_str(),
-                                                    GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
-                        if (hFile != INVALID_HANDLE_VALUE) {
-                            BITMAPFILEHEADER bmfHeader = {};
-                            bmfHeader.bfType = 0x4D42;
-                            bmfHeader.bfOffBits = sizeof(bmfHeader) + sizeof(bih);
-                            bmfHeader.bfSize = bmfHeader.bfOffBits + sizeImage;
-                            DWORD dwWritten;
-                            ::WriteFile(hFile, &bmfHeader, sizeof(bmfHeader), &dwWritten, nullptr);
-                            ::WriteFile(hFile, &bih, sizeof(bih), &dwWritten, nullptr);
-                            ::WriteFile(hFile, pBits, sizeImage, &dwWritten, nullptr);
-                            ::CloseHandle(hFile);
+                        tstring path = m_captureFolder + sep + fileName + suffix + ext;
+                        if (::GetFileAttributes(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+                            if (ext[1] == TEXT('b')) {
+                                fSaved = SaveImageAsBmp(path.c_str(), bih, pBits);
+                            }
+                            else {
+                                if (!m_hTVTestImage) {
+                                    m_hTVTestImage = ::LoadLibrary(TEXT("TVTest_Image.dll"));
+                                }
+                                if (!m_hTVTestImage) {
+                                    m_pApp->AddLog(L"TVTest_Image.dllの読み込みに失敗しました。");
+                                }
+                                else {
+                                    fSaved = SaveImageAsPngOrJpeg(m_hTVTestImage, path.c_str(), ext[1] == TEXT('p'),
+                                                                  ext[1] == TEXT('p') ? m_pngCompressionLevel : m_jpegQuality, bih, pBits);
+                                }
+                            }
                             break;
                         }
-                        _stprintf_s(ext, TEXT("-%d.bmp"), i);
+                        _stprintf_s(suffix, TEXT("-%d"), i);
+                    }
+                    if (!fSaved) {
+                        m_pApp->AddLog(L"字幕付き画像の保存に失敗しました。");
                     }
                 }
             }
@@ -1019,7 +1064,7 @@ void CTVCaption2::DestroyOsds()
     DeleteTextures();
 }
 
-void CTVCaption2::AddOsdText(CPseudoOSD *pOsd, LPCTSTR text, int width, int charWidth, int charHeight,
+void CTVCaption2::AddOsdText(CPseudoOSD *pOsd, LPCTSTR text, int width, int originalWidth, int charWidth, int charHeight,
                              const RECT &rcFontAdjust, LPCTSTR faceName, const CAPTION_CHAR_DATA_DLL &style) const
 {
     LOGFONT logFont;
@@ -1037,7 +1082,7 @@ void CTVCaption2::AddOsdText(CPseudoOSD *pOsd, LPCTSTR text, int width, int char
     logFont.lfQuality        = DRAFT_QUALITY;
     logFont.lfPitchAndFamily = (faceName[0]?DEFAULT_PITCH:FIXED_PITCH) | FF_DONTCARE;
     _tcscpy_s(logFont.lfFaceName, faceName);
-    pOsd->AddText(text, width, logFont, m_fEnTextColor ? m_textColor : RGB(style.stCharColor.ucR, style.stCharColor.ucG, style.stCharColor.ucB), rcFontAdjust);
+    pOsd->AddText(text, width, originalWidth, logFont, m_fEnTextColor ? m_textColor : RGB(style.stCharColor.ucR, style.stCharColor.ucG, style.stCharColor.ucB), rcFontAdjust);
 }
 
 // 利用可能なOSDを1つだけ用意する
@@ -1203,7 +1248,8 @@ void CTVCaption2::SetOsdWindowOffsetAndScale(CPseudoOSD *pOsd, const RECT &rcVid
 
 
 // 字幕本文を1行だけ処理する
-void CTVCaption2::ShowCaptionData(STREAM_INDEX index, const CAPTION_DATA_DLL &caption, const DRCS_PATTERN_DLL *pDrcsList, DWORD drcsCount,
+void CTVCaption2::ShowCaptionData(STREAM_INDEX index, const CAPTION_DATA_DLL &caption, bool fLangCodeJpn,
+                                  const DRCS_PATTERN_DLL *pDrcsList, DWORD drcsCount,
                                   SHIFT_SMALL_STATE &ssState, HWND hwndContainer, const RECT &rcVideo)
 {
 #ifdef DDEBUG_OUT
@@ -1217,6 +1263,7 @@ void CTVCaption2::ShowCaptionData(STREAM_INDEX index, const CAPTION_DATA_DLL &ca
     bool fDoneAntiPadding = false;
     int posX = caption.wPosX;
     int posY = caption.wPosY;
+    int originalPosX = posX;
 
     if (posY < ssState.posY) {
         // 前回よりも上方なのでリセット
@@ -1251,7 +1298,7 @@ void CTVCaption2::ShowCaptionData(STREAM_INDEX index, const CAPTION_DATA_DLL &ca
         }
         ssState.fSmall = ssState.fSmall && dirH == ssState.dirH && m_fShiftSmall && charData.wCharSizeMode == CP_STR_SMALL;
 
-        LPCTSTR pszShow = m_fIgnoreSmall && charData.wCharSizeMode == CP_STR_SMALL ? TEXT("") :
+        LPCTSTR pszShow = fLangCodeJpn && m_fIgnoreSmall && charData.wCharSizeMode == CP_STR_SMALL ? TEXT("") :
                           pszCarry ? pszCarry : static_cast<LPCTSTR>(charData.pszDecode);
         pszCarry = nullptr;
 
@@ -1354,11 +1401,13 @@ void CTVCaption2::ShowCaptionData(STREAM_INDEX index, const CAPTION_DATA_DLL &ca
         // 文字列を描画
         int lenWos = StrlenWoLoSurrogate(pszShow);
         if (pOsdCarry) {
-            AddOsdText(pOsdCarry, pszShow, dirW * lenWos, charW, charH, m_rcAdjust, m_szFaceName, charData);
-            posX += dirW * lenWos;
+            int width = dirW * lenWos;
+            AddOsdText(pOsdCarry, pszShow, width, width, charW, charH, m_rcAdjust, m_szFaceName, charData);
+            posX += width;
+            originalPosX += width;
             if (!fDrawSymbol && !fSameStyle) {
                 if (paddingW > 0) {
-                    AddOsdText(pOsdCarry, TEXT(""), paddingW, charW, charH, m_rcAdjust, m_szFaceName, charData);
+                    AddOsdText(pOsdCarry, TEXT(""), paddingW, 0, charW, charH, m_rcAdjust, m_szFaceName, charData);
                     posX += paddingW;
                 }
                 if (m_paintingMethod != 3) pOsdCarry->PrepareWindow();
@@ -1374,19 +1423,21 @@ void CTVCaption2::ShowCaptionData(STREAM_INDEX index, const CAPTION_DATA_DLL &ca
                 CPseudoOSD &osd = CreateOsd(index, hwndContainer, charH, charData.wCharH, charData);
                 osd.SetSWFMode(caption.wSWFMode);
                 SetOsdWindowOffsetAndScale(&osd, rcVideo);
-                osd.SetPosition(posX, posY - dirH + 1, dirH);
+                osd.SetPosition(posX, originalPosX, posY - dirH + 1, dirH);
                 if (paddingW > 0) {
-                    AddOsdText(&osd, TEXT(""), paddingW, charW, charH, m_rcAdjust, m_szFaceName, charData);
+                    AddOsdText(&osd, TEXT(""), paddingW, 0, charW, charH, m_rcAdjust, m_szFaceName, charData);
                     posX += paddingW;
                 }
-                AddOsdText(&osd, pszShow, dirW * lenWos, charW, charH, m_rcAdjust, m_szFaceName, charData);
-                posX += dirW * lenWos;
+                int width = dirW * lenWos;
+                AddOsdText(&osd, pszShow, width, width, charW, charH, m_rcAdjust, m_szFaceName, charData);
+                posX += width;
+                originalPosX += width;
                 if (fDrawSymbol || fSameStyle) {
                     pOsdCarry = &osd;
                 }
                 else {
                     if (paddingW > 0) {
-                        AddOsdText(&osd, TEXT(""), paddingW, charW, charH, m_rcAdjust, m_szFaceName, charData);
+                        AddOsdText(&osd, TEXT(""), paddingW, 0, charW, charH, m_rcAdjust, m_szFaceName, charData);
                         posX += paddingW;
                     }
                     if (m_paintingMethod != 3) osd.PrepareWindow();
@@ -1438,6 +1489,7 @@ void CTVCaption2::ShowCaptionData(STREAM_INDEX index, const CAPTION_DATA_DLL &ca
                     ::SetRect(&rc, (dirW - charW) / 2, (dirH - charH) / 2, charW, charH);
                     pOsdCarry->AddImage(hbm, dirW, RGB(charC.ucR, charC.ucG, charC.ucB), rc);
                     posX += dirW;
+                    originalPosX += dirW;
                 }
             }
         }
@@ -1446,24 +1498,27 @@ void CTVCaption2::ShowCaptionData(STREAM_INDEX index, const CAPTION_DATA_DLL &ca
             lenWos = StrlenWoLoSurrogate(pszDrcsStr);
             if (pOsdCarry && lenWos > 0) {
                 // レイアウト維持のため、何文字であっても1文字幅に詰める
-                AddOsdText(pOsdCarry, pszDrcsStr, dirW, charW / lenWos + 1, charH,
+                AddOsdText(pOsdCarry, pszDrcsStr, dirW, dirW, charW / lenWos + 1, charH,
                            m_szGaijiFaceName[0] ? m_rcGaijiAdjust : m_rcAdjust,
                            m_szGaijiFaceName[0] ? m_szGaijiFaceName : m_szFaceName, charData);
                 posX += dirW;
+                originalPosX += dirW;
             }
         }
         else if (szGaiji[0]) {
             // 外字を描画
             if (pOsdCarry) {
-                AddOsdText(pOsdCarry, szGaiji, dirW, charW, charH, m_rcGaijiAdjust, m_szGaijiFaceName, charData);
+                AddOsdText(pOsdCarry, szGaiji, dirW, dirW, charW, charH, m_rcGaijiAdjust, m_szGaijiFaceName, charData);
                 posX += dirW;
+                originalPosX += dirW;
             }
         }
         else if (szHalf[0]) {
             // 半角文字を描画
             if (pOsdCarry) {
-                AddOsdText(pOsdCarry, szHalf, dirW, -charData.wCharW, charH, m_rcAdjust, m_szFaceName, charData);
+                AddOsdText(pOsdCarry, szHalf, dirW, dirW, -charData.wCharW, charH, m_rcAdjust, m_szFaceName, charData);
                 posX += dirW;
+                originalPosX += dirW;
             }
         }
 
@@ -1592,9 +1647,11 @@ void CTVCaption2::ProcessCaption(CCaptionManager *pCaptionManager, const CAPTION
     }
     else {
         int dmf = 10;
+        bool fLangCodeJpn = true;
         if (!pCaptionForTest) {
             const LANG_TAG_INFO_DLL *pLangTag = pCaptionManager->GetLangTag();
             dmf = pLangTag ? pLangTag->ucDMF : 16;
+            fLangCodeJpn = !pLangTag || !strncmp(pLangTag->szISOLangCode, "jpn", 3);
         }
         if (m_fNeedtoShow && ((m_showFlags[index]>>dmf)&1)) {
             if (pCaption->bClear) {
@@ -1627,7 +1684,7 @@ void CTVCaption2::ProcessCaption(CCaptionManager *pCaptionManager, const CAPTION
                             }
                         }
                     }
-                    ShowCaptionData(index, *pCaption, pDrcsList, drcsCount, m_shiftSmallState[index], m_hwndContainer, rcExVideo);
+                    ShowCaptionData(index, *pCaption, fLangCodeJpn, pDrcsList, drcsCount, m_shiftSmallState[index], m_hwndContainer, rcExVideo);
                 }
             }
         }
@@ -1639,8 +1696,34 @@ void CTVCaption2::ProcessCaption(CCaptionManager *pCaptionManager, const CAPTION
         }
     }
 
+    bool fClear = m_fOsdClear[index];
+    if (!fClear) {
+        // 表示中のOSDが表示待ちOSDによってすべて隠れる場合はクリアする
+        // 判定アルゴリズムとしては完全ではないが補助的なもの
+        for (size_t i = 0; i < m_osdShowCount[index]; ++i) {
+            fClear = false;
+            int left, top, width, height;
+            m_pOsdList[index][i]->GetOriginalPosition(&left, &top, &width, &height);
+            RECT rcSub;
+            ::SetRect(&rcSub, left, top, left + width, top + height);
+            for (size_t j = m_osdShowCount[index]; j < m_osdShowCount[index] + m_osdPrepareCount[index]; ++j) {
+                m_pOsdList[index][j]->GetOriginalPosition(&left, &top, &width, &height);
+                RECT rc = rcSub;
+                RECT rc2;
+                ::SetRect(&rc2, left, top, left + width, top + height);
+                if (!::SubtractRect(&rcSub, &rc, &rc2)) {
+                    fClear = true;
+                    break;
+                }
+            }
+            if (!fClear) {
+                break;
+            }
+        }
+    }
+
     bool fTextureModified = false;
-    if (m_fOsdClear[index]) {
+    if (fClear) {
         m_fOsdClear[index] = false;
         HideOsds(index);
         if (m_paintingMethod == 3) {
@@ -2044,7 +2127,7 @@ void CTVCaption2::InitializeSettingsDlg(HWND hDlg)
     static const LPCTSTR METHOD_LIST[] = { TEXT("1-通常ウィンドウ"), TEXT("2-レイヤードウィンドウ"), TEXT("3-映像と合成"), nullptr };
     ::SendDlgItemMessage(hDlg, IDC_COMBO_METHOD, CB_RESETCONTENT, 0, 0);
     AddToComboBoxList(hDlg, IDC_COMBO_METHOD, METHOD_LIST);
-    ::SendDlgItemMessage(hDlg, IDC_COMBO_METHOD, CB_SETCURSEL, min(max(m_paintingMethod-1,0),2), 0);
+    ::SendDlgItemMessage(hDlg, IDC_COMBO_METHOD, CB_SETCURSEL, min(max(m_paintingMethod - 1, 0), 2), 0);
 
     ::CheckDlgButton(hDlg, IDC_CHECK_CAPTION, m_showFlags[STREAM_CAPTION] ? BST_CHECKED : BST_UNCHECKED);
     ::CheckDlgButton(hDlg, IDC_CHECK_SUPERIMPOSE, m_showFlags[STREAM_SUPERIMPOSE] ? BST_CHECKED : BST_UNCHECKED);
@@ -2071,7 +2154,7 @@ void CTVCaption2::InitializeSettingsDlg(HWND hDlg)
     static const LPCTSTR STROKE_LEVEL_LIST[] = { TEXT("0"), TEXT("1"), TEXT("2"), TEXT("3"), TEXT("4"), TEXT("5"), nullptr };
     ::SendDlgItemMessage(hDlg, IDC_COMBO_STROKE_LEVEL, CB_RESETCONTENT, 0, 0);
     AddToComboBoxList(hDlg, IDC_COMBO_STROKE_LEVEL, STROKE_LEVEL_LIST);
-    ::SendDlgItemMessage(hDlg, IDC_COMBO_STROKE_LEVEL, CB_SETCURSEL, min(max(m_strokeSmoothLevel,0),5), 0);
+    ::SendDlgItemMessage(hDlg, IDC_COMBO_STROKE_LEVEL, CB_SETCURSEL, min(max(m_strokeSmoothLevel, 0), 5), 0);
 
     ::SetDlgItemInt(hDlg, IDC_EDIT_BY_DILATE, m_strokeByDilate, FALSE);
     ::SetDlgItemInt(hDlg, IDC_EDIT_VERT_ANTI, m_vertAntiAliasing, FALSE);
@@ -2211,7 +2294,7 @@ INT_PTR CTVCaption2::ProcessSettingsDlg(HWND hDlg, UINT uMsg, WPARAM wParam, LPA
             if (HIWORD(wParam) == CBN_SELCHANGE) {
                 HideAllOsds();
                 m_paintingMethod = static_cast<int>(::SendDlgItemMessage(hDlg, IDC_COMBO_METHOD, CB_GETCURSEL, 0, 0));
-                m_paintingMethod = min(max(m_paintingMethod,0),2) + 1;
+                m_paintingMethod = min(max(m_paintingMethod, 0), 2) + 1;
                 fSave = fReDisp = true;
             }
             break;
@@ -2298,7 +2381,7 @@ INT_PTR CTVCaption2::ProcessSettingsDlg(HWND hDlg, UINT uMsg, WPARAM wParam, LPA
         case IDC_COMBO_STROKE_LEVEL:
             if (HIWORD(wParam) == CBN_SELCHANGE) {
                 m_strokeSmoothLevel = static_cast<int>(::SendDlgItemMessage(hDlg, IDC_COMBO_STROKE_LEVEL, CB_GETCURSEL, 0, 0));
-                m_strokeSmoothLevel = min(max(m_strokeSmoothLevel,0),5);
+                m_strokeSmoothLevel = min(max(m_strokeSmoothLevel, 0), 5);
                 fSave = fReDisp = true;
             }
             break;
