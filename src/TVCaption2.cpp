@@ -1,5 +1,5 @@
 ﻿// TVTestに字幕を表示するプラグイン(based on TVCaption 2008-12-16 by odaru)
-// 最終更新: 2023-11-18
+// 最終更新: 2024-02-11
 // 署名: xt(849fa586809b0d16276cd644c6749503)
 #include <Windows.h>
 #include <memory>
@@ -33,7 +33,7 @@ const UINT WM_APP_DONE_MOVE = WM_APP + 2;
 const UINT WM_APP_RESET_OSDS = WM_APP + 4;
 
 const TCHAR INFO_PLUGIN_NAME[] = TEXT("TVCaptionMod2");
-const TCHAR INFO_DESCRIPTION[] = TEXT("字幕を表示 (ver.2.9; based on TVCaption081216 by odaru)");
+const TCHAR INFO_DESCRIPTION[] = TEXT("字幕を表示 (ver.3.1; based on TVCaption081216 by odaru)");
 const int INFO_VERSION = 16;
 const TCHAR TV_CAPTION2_WINDOW_CLASS[] = TEXT("TVTest TVCaption2");
 
@@ -103,6 +103,9 @@ CTVCaption2::CTVCaption2()
     , m_adjustViewX(0)
     , m_adjustViewY(0)
     , m_fInitializeSettingsDlg(false)
+    , m_hbmSwitchLang(nullptr)
+    , m_hbmSwitchSetting(nullptr)
+    , m_fDoneLoadTVTestImage(false)
     , m_hTVTestImage(nullptr)
     , m_hwndPainting(nullptr)
     , m_hwndContainer(nullptr)
@@ -195,12 +198,14 @@ bool CTVCaption2::Initialize()
     ciList[0].State = TVTest::PLUGIN_COMMAND_STATE_DISABLED;
     ciList[0].pszText = L"SwitchLang";
     ciList[0].pszName = L"字幕言語切り替え";
-    ciList[0].hbmIcon = static_cast<HBITMAP>(::LoadImage(g_hinstDLL, MAKEINTRESOURCE(IDB_SWITCH_LANG), IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION));
+    m_hbmSwitchLang = static_cast<HBITMAP>(::LoadImage(g_hinstDLL, MAKEINTRESOURCE(IDB_SWITCH_LANG), IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION));
+    ciList[0].hbmIcon = m_hbmSwitchLang;
     ciList[1].ID = ID_COMMAND_SWITCH_SETTING;
     ciList[1].State = TVTest::PLUGIN_COMMAND_STATE_DISABLED;
     ciList[1].pszText = L"SwitchSetting";
     ciList[1].pszName = L"表示設定切り替え";
-    ciList[1].hbmIcon = static_cast<HBITMAP>(::LoadImage(g_hinstDLL, MAKEINTRESOURCE(IDB_SWITCH_SETTING), IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION));
+    m_hbmSwitchSetting = static_cast<HBITMAP>(::LoadImage(g_hinstDLL, MAKEINTRESOURCE(IDB_SWITCH_SETTING), IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION));
+    ciList[1].hbmIcon = m_hbmSwitchSetting;
     ciList[2].ID = ID_COMMAND_CAPTURE;
     ciList[2].State = 0;
     ciList[2].pszText = L"Capture";
@@ -213,13 +218,10 @@ bool CTVCaption2::Initialize()
     ciList[3].hbmIcon = nullptr;
     for (int i = 0; i < _countof(ciList); ++i) {
         ciList[i].Size = sizeof(ciList[0]);
-        ciList[i].Flags = ciList[i].hbmIcon ? TVTest::PLUGIN_COMMAND_FLAG_ICONIZE : 0;
+        ciList[i].Flags = ciList[i].hbmIcon ? TVTest::PLUGIN_COMMAND_FLAG_ICONIZE | TVTest::PLUGIN_COMMAND_FLAG_NOTIFYDRAWICON : 0;
         ciList[i].pszDescription = ciList[i].pszName;
         if (!m_pApp->RegisterPluginCommand(&ciList[i])) {
             m_pApp->RegisterCommand(ciList[i].ID, ciList[i].pszText, ciList[i].pszName);
-        }
-        if (ciList[i].hbmIcon) {
-            ::DeleteObject(ciList[i].hbmIcon);
         }
     }
 
@@ -234,6 +236,14 @@ bool CTVCaption2::Finalize()
 {
     if (m_pApp->IsPluginEnabled()) EnablePlugin(false);
     m_osdCompositor.Uninitialize();
+    if (m_hbmSwitchLang) {
+        ::DeleteObject(m_hbmSwitchLang);
+        m_hbmSwitchLang = nullptr;
+    }
+    if (m_hbmSwitchSetting) {
+        ::DeleteObject(m_hbmSwitchSetting);
+        m_hbmSwitchSetting = nullptr;
+    }
     return true;
 }
 
@@ -515,6 +525,7 @@ bool CTVCaption2::EnablePlugin(bool fEnable)
             ::FreeLibrary(m_hTVTestImage);
             m_hTVTestImage = nullptr;
         }
+        m_fDoneLoadTVTestImage = false;
 
         m_captionDll.UnInitialize();
 
@@ -843,8 +854,62 @@ LRESULT CALLBACK CTVCaption2::EventCallback(UINT Event, LPARAM lParam1, LPARAM l
         // フィルタグラフの終了処理開始
         pThis->m_osdCompositor.OnFilterGraphFinalize(reinterpret_cast<const TVTest::FilterGraphInfo*>(lParam1)->pGraphBuilder);
         break;
+    case TVTest::EVENT_DRAWCOMMANDICON:
+        // コマンドアイコンの描画
+        {
+            const TVTest::DrawCommandIconInfo *pInfo = reinterpret_cast<const TVTest::DrawCommandIconInfo*>(lParam1);
+            HBITMAP hbm = pInfo->ID == ID_COMMAND_SWITCH_LANG ? pThis->m_hbmSwitchLang :
+                          pInfo->ID == ID_COMMAND_SWITCH_SETTING ? pThis->m_hbmSwitchSetting : nullptr;
+            if (hbm) {
+                // TVTest本体のリサイズが汚いのでここで処理する
+                BITMAPINFOHEADER bih = {};
+                bih.biSize = sizeof(BITMAPINFOHEADER);
+                bih.biWidth = pInfo->DrawRect.right - pInfo->DrawRect.left;
+                bih.biHeight = pInfo->DrawRect.bottom - pInfo->DrawRect.top;
+                bih.biPlanes = 1;
+                bih.biBitCount = 24;
+                bih.biCompression = BI_RGB;
+                void *pBits;
+                HBITMAP hbmTmp = ::CreateDIBSection(nullptr, reinterpret_cast<BITMAPINFO*>(&bih), DIB_RGB_COLORS, &pBits, nullptr, 0);
+                if (hbmTmp) {
+                    bool fRet = false;
+                    HDC hdcTmp = ::CreateCompatibleDC(pInfo->hdc);
+                    if (hdcTmp) {
+                        HBITMAP hbmOld = static_cast<HBITMAP>(::SelectObject(hdcTmp, hbmTmp));
+                        fRet = StretchDrawBitmap(hdcTmp, 0, 0, bih.biWidth, bih.biHeight, hbm, STRETCH_HALFTONE, STRETCH_DELETESCANS);
+                        ::SelectObject(hdcTmp, hbmOld);
+                        ::DeleteDC(hdcTmp);
+                        TVTest::ThemeDrawIconInfo drawInfo = {};
+                        drawInfo.pszStyle = pInfo->pszStyle;
+                        drawInfo.hdc = pInfo->hdc;
+                        drawInfo.hbm = hbmTmp;
+                        drawInfo.DstRect = pInfo->DrawRect;
+                        ::SetRect(&drawInfo.SrcRect, 0, 0, bih.biWidth, bih.biHeight);
+                        drawInfo.Color = pInfo->Color;
+                        drawInfo.Opacity = pInfo->Opacity;
+                        fRet = fRet && pThis->m_pApp->ThemeDrawIcon(&drawInfo);
+                    }
+                    ::DeleteObject(hbmTmp);
+                    return fRet;
+                }
+            }
+        }
+        break;
     }
     return 0;
+}
+
+
+bool CTVCaption2::LoadTVTestImageLibrary()
+{
+    if (!m_fDoneLoadTVTestImage) {
+        m_hTVTestImage = ::LoadLibrary(TEXT("TVTest_Image.dll"));
+        if (!m_hTVTestImage) {
+            m_pApp->AddLog(L"TVTest_Image.dllの読み込みに失敗しました。");
+        }
+        m_fDoneLoadTVTestImage = true;
+    }
+    return !!m_hTVTestImage;
 }
 
 
@@ -889,10 +954,12 @@ void CTVCaption2::OnCapture(bool fSaveToFile)
                     HBITMAP hbmRes = ::CreateDIBSection(nullptr, reinterpret_cast<BITMAPINFO*>(&bihRes), DIB_RGB_COLORS, &pBitsRes, nullptr, 0);
                     if (hbmRes) {
                         HDC hdc = ::CreateCompatibleDC(nullptr);
-                        HBITMAP hbmOld = static_cast<HBITMAP>(::SelectObject(hdc, hbmRes));
-                        DrawUtil::DrawBitmap(hdc, 0, 0, bihRes.biWidth, bihRes.biHeight, hbm);
-                        ::SelectObject(hdc, hbmOld);
-                        ::DeleteDC(hdc);
+                        if (hdc) {
+                            HBITMAP hbmResOld = static_cast<HBITMAP>(::SelectObject(hdc, hbmRes));
+                            StretchDrawBitmap(hdc, 0, 0, bihRes.biWidth, bihRes.biHeight, hbm);
+                            ::SelectObject(hdc, hbmResOld);
+                            ::DeleteDC(hdc);
+                        }
                         ::DeleteObject(hbm);
                         hbm = hbmRes;
                         bih = bihRes;
@@ -902,16 +969,18 @@ void CTVCaption2::OnCapture(bool fSaveToFile)
 
                 // ビットマップに表示中のOSDを合成
                 HDC hdc = ::CreateCompatibleDC(nullptr);
-                HBITMAP hbmOld = static_cast<HBITMAP>(::SelectObject(hdc, hbm));
-                for (int i = 0; i < STREAM_MAX; ++i) {
-                    for (size_t j = 0; j < m_osdShowCount[i]; ++j) {
-                        int left, top;
-                        m_pOsdList[i][j]->GetWindowPosition(&left, &top, nullptr, nullptr);
-                        m_pOsdList[i][j]->Compose(hdc, left - rcVideo.left, top - rcVideo.top);
+                if (hdc) {
+                    HBITMAP hbmOld = static_cast<HBITMAP>(::SelectObject(hdc, hbm));
+                    for (int i = 0; i < STREAM_MAX; ++i) {
+                        for (size_t j = 0; j < m_osdShowCount[i]; ++j) {
+                            int left, top;
+                            m_pOsdList[i][j]->GetWindowPosition(&left, &top, nullptr, nullptr);
+                            m_pOsdList[i][j]->Compose(hdc, left - rcVideo.left, top - rcVideo.top);
+                        }
                     }
+                    ::SelectObject(hdc, hbmOld);
+                    ::DeleteDC(hdc);
                 }
-                ::SelectObject(hdc, hbmOld);
-                ::DeleteDC(hdc);
             }
 
             ::GdiFlush();
@@ -949,17 +1018,9 @@ void CTVCaption2::OnCapture(bool fSaveToFile)
                             if (ext[1] == TEXT('b')) {
                                 fSaved = SaveImageAsBmp(path.c_str(), bih, pBits);
                             }
-                            else {
-                                if (!m_hTVTestImage) {
-                                    m_hTVTestImage = ::LoadLibrary(TEXT("TVTest_Image.dll"));
-                                }
-                                if (!m_hTVTestImage) {
-                                    m_pApp->AddLog(L"TVTest_Image.dllの読み込みに失敗しました。");
-                                }
-                                else {
-                                    fSaved = SaveImageAsPngOrJpeg(m_hTVTestImage, path.c_str(), ext[1] == TEXT('p'),
-                                                                  ext[1] == TEXT('p') ? m_pngCompressionLevel : m_jpegQuality, bih, pBits);
-                                }
+                            else if (LoadTVTestImageLibrary()) {
+                                fSaved = SaveImageAsPngOrJpeg(m_hTVTestImage, path.c_str(), ext[1] == TEXT('p'),
+                                                              ext[1] == TEXT('p') ? m_pngCompressionLevel : m_jpegQuality, bih, pBits);
                             }
                             break;
                         }
@@ -1247,6 +1308,51 @@ void CTVCaption2::SetOsdWindowOffsetAndScale(CPseudoOSD *pOsd, const RECT &rcVid
 }
 
 
+void CTVCaption2::ShowBitmapData(STREAM_INDEX index, const BITMAP_DATA_DLL &bitmapData, HWND hwndContainer, const RECT &rcVideo)
+{
+    if (LoadTVTestImageLibrary()) {
+        // 表示領域外は切り取る
+        RECT rcCrop;
+        rcCrop.left = max(-bitmapData.iPosX, 0);
+        rcCrop.top = max(-bitmapData.iPosY, 0);
+        rcCrop.right = max(bitmapData.wClientW - bitmapData.iPosX, rcCrop.left);
+        rcCrop.bottom = max(bitmapData.wClientH - bitmapData.iPosY, rcCrop.top);
+        void *pBits;
+        HBITMAP hbm = LoadAribPngAsDIBSection(m_hTVTestImage, bitmapData.pbImage, bitmapData.dwImageSize, &pBits, &rcCrop);
+        if (hbm) {
+            HBITMAP hbmFlush = nullptr;
+            if (bitmapData.dwFlushColorCount > 0) {
+                hbmFlush = CopyDIBSectionWithTransparency(hbm, bitmapData.pstFlushColorList, bitmapData.dwFlushColorCount, &pBits);
+            }
+            CAPTION_CHAR_DATA_DLL style = {};
+            style.stCharColor.ucAlpha = 255;
+            style.stBackColor = bitmapData.stRasterColor;
+            style.bFlushMode = hbmFlush ? 1 : 0;
+            CPseudoOSD &osd = CreateOsd(index, hwndContainer, 0, 0, style);
+            osd.SetSWFMode(bitmapData.wSWFMode);
+            SetOsdWindowOffsetAndScale(&osd, rcVideo);
+            int posX = bitmapData.wClientX + max(bitmapData.iPosX, 0);
+            int posY = bitmapData.wClientY + max(bitmapData.iPosY, 0);
+            if (m_paintingMethod == 3) {
+                osd.SetSingleImage(hbm, nullptr, posX, posY);
+                if (hbmFlush) {
+                    // フラッシング用に逆相のOSDを追加
+                    style.bFlushMode = 2;
+                    CPseudoOSD &osdFlush = CreateOsd(index, hwndContainer, 0, 0, style);
+                    osdFlush.SetSWFMode(bitmapData.wSWFMode);
+                    SetOsdWindowOffsetAndScale(&osdFlush, rcVideo);
+                    osdFlush.SetSingleImage(hbmFlush, nullptr, posX, posY);
+                }
+            }
+            else {
+                osd.SetSingleImage(hbm, hbmFlush, posX, posY);
+                osd.PrepareWindow();
+            }
+        }
+    }
+}
+
+
 // 字幕本文を1行だけ処理する
 void CTVCaption2::ShowCaptionData(STREAM_INDEX index, const CAPTION_DATA_DLL &caption, bool fLangCodeJpn,
                                   const DRCS_PATTERN_DLL *pDrcsList, DWORD drcsCount,
@@ -1351,7 +1457,7 @@ void CTVCaption2::ShowCaptionData(STREAM_INDEX index, const CAPTION_DATA_DLL &ca
                         break;
                     }
                 }
-                else if (fSearchHalf) {
+                else if (fSearchHalf && !IsNonSpacingCharacter(pszShow[j+1])) {
                     for (int k = 0; HALF_F_LIST[k]; ++k) {
                         TCHAR r = HALF_R_LIST[k];
                         if ((!(m_avoidHalfFlags & 1) || r != TEXT('A') && r != TEXT('a')) &&
@@ -1399,7 +1505,7 @@ void CTVCaption2::ShowCaptionData(STREAM_INDEX index, const CAPTION_DATA_DLL &ca
         }
 
         // 文字列を描画
-        int lenWos = StrlenWoLoSurrogate(pszShow);
+        int lenWos = StrlenWoLoSurrogateOrNonSpacing(pszShow);
         if (pOsdCarry) {
             int width = dirW * lenWos;
             AddOsdText(pOsdCarry, pszShow, width, width, charW, charH, m_rcAdjust, m_szFaceName, charData);
@@ -1495,7 +1601,7 @@ void CTVCaption2::ShowCaptionData(STREAM_INDEX index, const CAPTION_DATA_DLL &ca
         }
         else if (pDrcs && pszDrcsStr) {
             // DRCSを文字列で描画
-            lenWos = StrlenWoLoSurrogate(pszDrcsStr);
+            lenWos = StrlenWoLoSurrogateOrNonSpacing(pszDrcsStr);
             if (pOsdCarry && lenWos > 0) {
                 // レイアウト維持のため、何文字であっても1文字幅に詰める
                 AddOsdText(pOsdCarry, pszDrcsStr, dirW, dirW, charW / lenWos + 1, charH,
@@ -1640,27 +1746,28 @@ void CTVCaption2::ProcessCaption(CCaptionManager *pCaptionManager, const CAPTION
         }
     }
 
-    // 表示タイミングに達した字幕本文を1つだけ取得する
-    const CAPTION_DATA_DLL *pCaption = pCaptionForTest ? pCaptionForTest : pCaptionManager->PopCaption(pcr, m_fIgnorePts);
+    const CAPTION_DATA_DLL *pCaption = pCaptionForTest;
+    const BITMAP_DATA_DLL *pBitmapData = nullptr;
+    int dmf = 10;
+    bool fLangCodeJpn = true;
     if (!pCaption) {
-        return;
-    }
-    else {
-        int dmf = 10;
-        bool fLangCodeJpn = true;
-        if (!pCaptionForTest) {
-            const LANG_TAG_INFO_DLL *pLangTag = pCaptionManager->GetLangTag();
-            dmf = pLangTag ? pLangTag->ucDMF : 16;
-            fLangCodeJpn = !pLangTag || !strncmp(pLangTag->szISOLangCode, "jpn", 3);
+        // 表示タイミングに達した字幕本文かビットマップ図形を1つだけとり出す
+        if (!pCaptionManager->PopCaptionOrBitmap(&pCaption, &pBitmapData, pcr, m_fIgnorePts)) {
+            return;
         }
-        if (m_fNeedtoShow && ((m_showFlags[index]>>dmf)&1)) {
-            if (pCaption->bClear) {
-                m_fOsdClear[index] = true;
-                m_shiftSmallState[index] = SHIFT_SMALL_STATE();
-            }
-            else {
-                RECT rcExVideo;
-                if (GetVideoSurfaceRect(m_hwndContainer, nullptr, &rcExVideo)) {
+        const LANG_TAG_INFO_DLL *pLangTag = pCaptionManager->GetLangTag();
+        dmf = pLangTag ? pLangTag->ucDMF : 16;
+        fLangCodeJpn = !pLangTag || !strncmp(pLangTag->szISOLangCode, "jpn", 3);
+    }
+    if (m_fNeedtoShow && ((m_showFlags[index]>>dmf)&1)) {
+        if (pCaption && pCaption->bClear) {
+            m_fOsdClear[index] = true;
+            m_shiftSmallState[index] = SHIFT_SMALL_STATE();
+        }
+        else {
+            RECT rcExVideo;
+            if (GetVideoSurfaceRect(m_hwndContainer, nullptr, &rcExVideo)) {
+                if (pCaption) {
                     const DRCS_PATTERN_DLL *pDrcsList = nullptr;
                     DWORD drcsCount = 0;
                     if (!pCaptionForTest) {
@@ -1669,8 +1776,17 @@ void CTVCaption2::ProcessCaption(CCaptionManager *pCaptionManager, const CAPTION
                             // クリア後の最初の字幕本文
                             SHIFT_SMALL_STATE ssState;
                             for (int i = -1; ; ++i) {
-                                const CAPTION_DATA_DLL *p = i < 0 ? pCaption : pCaptionManager->GetCaption(pcr, m_fIgnorePts, i);
-                                if (!p || p->bClear) {
+                                const CAPTION_DATA_DLL *p = pCaption;
+                                if (i >= 0) {
+                                    if (!pCaptionManager->GetCaptionOrBitmap(&p, nullptr, pcr, m_fIgnorePts, i)) {
+                                        break;
+                                    }
+                                    if (!p) {
+                                        // ビットマップ図形は無視
+                                        continue;
+                                    }
+                                }
+                                if (p->bClear) {
                                     break;
                                 }
                                 ssState.shiftH = -1;
@@ -1686,14 +1802,17 @@ void CTVCaption2::ProcessCaption(CCaptionManager *pCaptionManager, const CAPTION
                     }
                     ShowCaptionData(index, *pCaption, fLangCodeJpn, pDrcsList, drcsCount, m_shiftSmallState[index], m_hwndContainer, rcExVideo);
                 }
+                else {
+                    ShowBitmapData(index, *pBitmapData, m_hwndContainer, rcExVideo);
+                }
             }
         }
-        // 次行が取得できるかどうか
-        if (!pCaptionForTest && pCaptionManager->GetCaption(pcr, m_fIgnorePts, 0)) {
-            // 他のメッセージの遅延を減らすため次行の描画は後回しにする
-            ::PostMessage(m_hwndPainting, WM_APP_PROCESS_CAPTION, 0, 0);
-            return;
-        }
+    }
+    // 次行が取得できるかどうか
+    if (!pCaptionForTest && pCaptionManager->GetCaptionOrBitmap(nullptr, nullptr, pcr, m_fIgnorePts, 0)) {
+        // 他のメッセージの遅延を減らすため次行の描画は後回しにする
+        ::PostMessage(m_hwndPainting, WM_APP_PROCESS_CAPTION, 0, 0);
+        return;
     }
 
     bool fClear = m_fOsdClear[index];

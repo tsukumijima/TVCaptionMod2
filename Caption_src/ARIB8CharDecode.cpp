@@ -100,6 +100,7 @@ BOOL CARIB8CharDecode::InitCaption(void)
 	m_GR = &m_G2;
 
 	m_strDecode = L"";
+	m_strPending = L"";
 	m_emStrSize = CP_STR_NORMAL;
 
 	m_bCharColorIndex = 7;
@@ -119,8 +120,6 @@ BOOL CARIB8CharDecode::InitCaption(void)
 	switch(m_wSWFMode){
 	case 7:
 		//960x540横
-		m_wClientW = 960;
-		m_wClientH = 540;
 		m_wCharW = 36;
 		m_wCharH = 36;
 		m_wCharHInterval = 4;
@@ -128,8 +127,6 @@ BOOL CARIB8CharDecode::InitCaption(void)
 		break;
 	case 8:
 		//960x540縦
-		m_wClientW = 960;
-		m_wClientH = 540;
 		m_wCharW = 36;
 		m_wCharH = 36;
 		m_wCharHInterval = 12;
@@ -137,8 +134,6 @@ BOOL CARIB8CharDecode::InitCaption(void)
 		break;
 	case 9:
 		//720x480横
-		m_wClientW = 720;
-		m_wClientH = 480;
 		m_wCharW = 36;
 		m_wCharH = 36;
 		m_wCharHInterval = 4;
@@ -146,8 +141,6 @@ BOOL CARIB8CharDecode::InitCaption(void)
 		break;
 	case 10:
 		//720x480縦
-		m_wClientW = 720;
-		m_wClientH = 480;
 		m_wCharW = 36;
 		m_wCharH = 36;
 		m_wCharHInterval = 8;
@@ -156,8 +149,6 @@ BOOL CARIB8CharDecode::InitCaption(void)
 	case 14:
 		//Cプロファイル
 		//表示領域320x180、表示区画20x24で固定
-		m_wClientW = 320;
-		m_wClientH = 180;
 		m_wCharW = 18;
 		m_wCharH = 18;
 		m_wCharHInterval = 2;
@@ -166,6 +157,7 @@ BOOL CARIB8CharDecode::InitCaption(void)
 	default:
 		return FALSE;
 	}
+	GetDisplayAreaFromSWFMode(&m_wClientW, &m_wClientH, m_wSWFMode);
 	m_wClientX = 0;
 	m_wClientY = 0;
 	m_wPosStartX = m_wPosX = m_wClientX;
@@ -267,9 +259,13 @@ BOOL CARIB8CharDecode::Analyze( const BYTE* pbSrc, DWORD dwSrcSize, DWORD* pdwRe
 			if( m_wRPC != 0 && --m_wRPC == 0 ){
 				//文字繰り返し終了
 				m_bRPC = FALSE;
+				m_strPending = L"";
 				dwReadSize += dwReadBuff;
 			}
 		}else{
+			if( m_bSpacing ){
+				m_strPending = L"";
+			}
 			dwReadSize += dwReadBuff;
 		}
 	}
@@ -291,7 +287,7 @@ BOOL CARIB8CharDecode::C0( const BYTE* pbSrc, DWORD dwSrcSize, DWORD* pdwReadSiz
 	switch(pbSrc[0]){
 	case 0x20:
 		//SP 背景色空白
-		m_strDecode += m_bLatin ? L' ' : L'　';
+		AddDecodedCharacters(m_bLatin ? L' ' : L'　');
 		ActivePositionForward(1);
 		m_bSpacing = TRUE;
 		break;
@@ -469,7 +465,7 @@ BOOL CARIB8CharDecode::C1( const BYTE* pbSrc, DWORD dwSrcSize, DWORD* pdwReadSiz
 	switch(b){
 	case 0x7F:
 		//DEL 前景色空白
-		m_strDecode += L'■';
+		AddDecodedCharacters(L'■');
 		ActivePositionForward(1);
 		m_bSpacing = TRUE;
 		break;
@@ -669,7 +665,7 @@ BOOL CARIB8CharDecode::GL_GR( const BYTE* pbSrc, DWORD dwSrcSize, DWORD* pdwRead
 			case MF_JISX_KANA:
 				{
 				//JIS X0201片仮名
-				m_strDecode += JisXKanaTable[b - 0x21];
+				AddDecodedCharacters(JisXKanaTable[b - 0x21]);
 				ActivePositionForward(1);
 				}
 				break;
@@ -677,7 +673,7 @@ BOOL CARIB8CharDecode::GL_GR( const BYTE* pbSrc, DWORD dwSrcSize, DWORD* pdwRead
 			case MF_PROP_ASCII:
 				{
 				//全角なのでテーブルからコード取得
-				m_strDecode += m_bLatin ? (WCHAR)b : AsciiTable[b - 0x21];
+				AddDecodedCharacters(m_bLatin ? (WCHAR)b : AsciiTable[b - 0x21]);
 				ActivePositionForward(1);
 				}
 				break;
@@ -685,7 +681,7 @@ BOOL CARIB8CharDecode::GL_GR( const BYTE* pbSrc, DWORD dwSrcSize, DWORD* pdwRead
 			case MF_PROP_HIRA:
 				{
 				//Gセットのひらがな系集合
-				m_strDecode += HiraTable[b - 0x21];
+				AddDecodedCharacters(HiraTable[b - 0x21]);
 				ActivePositionForward(1);
 				}
 				break;
@@ -693,7 +689,7 @@ BOOL CARIB8CharDecode::GL_GR( const BYTE* pbSrc, DWORD dwSrcSize, DWORD* pdwRead
 			case MF_PROP_KANA:
 				{
 				//Gセットのカタカナ系集合
-				m_strDecode += KanaTable[b - 0x21];
+				AddDecodedCharacters(KanaTable[b - 0x21]);
 				ActivePositionForward(1);
 				}
 				break;
@@ -716,18 +712,42 @@ BOOL CARIB8CharDecode::GL_GR( const BYTE* pbSrc, DWORD dwSrcSize, DWORD* pdwRead
 				if( ToSJIS(&ucFirst, &ucSecond) == FALSE ){
 					AddGaijiToString(b, pbSrc[1]&0x7F);
 				}else{
-					AddSJISToString(ucFirst, ucSecond);
+					//ノンスペーシング文字「´｀¨＾￣＿◯」
+					if( ucFirst == 0x81 && ucSecond == 0x4C ){
+						m_strPending += (WCHAR)0x0301;
+						m_bSpacing = FALSE;
+					}else if( ucFirst == 0x81 && ucSecond == 0x4D ){
+						m_strPending += (WCHAR)0x0300;
+						m_bSpacing = FALSE;
+					}else if( ucFirst == 0x81 && ucSecond == 0x4E ){
+						m_strPending += (WCHAR)0x0308;
+						m_bSpacing = FALSE;
+					}else if( ucFirst == 0x81 && ucSecond == 0x4F ){
+						m_strPending += (WCHAR)0x0302;
+						m_bSpacing = FALSE;
+					}else if( ucFirst == 0x81 && ucSecond == 0x50 ){
+						m_strPending += (WCHAR)0x0305;
+						m_bSpacing = FALSE;
+					}else if( ucFirst == 0x81 && ucSecond == 0x51 ){
+						m_strPending += (WCHAR)0x0332;
+						m_bSpacing = FALSE;
+					}else if( ucFirst == 0x81 && ucSecond == 0xFC ){
+						m_strPending += (WCHAR)0x20DD;
+						m_bSpacing = FALSE;
+					}else{
+						AddSJISToString(ucFirst, ucSecond);
+					}
 				}
 				}
 				break;
 			case MF_LATIN_EXTENSION:
 				//ラテン文字拡張
-				m_strDecode += LatinExtensionTable[b - 0x21];
+				AddDecodedCharacters(LatinExtensionTable[b - 0x21]);
 				ActivePositionForward(1);
 				break;
 			case MF_LATIN_SPECIAL:
 				//ラテン文字特殊
-				m_strDecode += LatinSpecialTable[b - 0x21];
+				AddDecodedCharacters(LatinSpecialTable[b - 0x21]);
 				ActivePositionForward(1);
 				break;
 			default:
@@ -747,7 +767,7 @@ BOOL CARIB8CharDecode::GL_GR( const BYTE* pbSrc, DWORD dwSrcSize, DWORD* pdwRead
 				//1バイトDRCSは0x01xxから0x0Fxxに符号シフト
 				cc = (BYTE)(mode->iMF-MF_DRCS_0)<<8 | b;
 			}
-			m_strDecode += m_pDRCMap->MapUCS(cc);
+			AddDecodedCharacters(m_pDRCMap->MapUCS(cc));
 			ActivePositionForward(1);
 			m_bSpacing = TRUE;
 		}else if( mode->iMF == MF_MACRO ){
@@ -862,18 +882,24 @@ BOOL CARIB8CharDecode::G_UCS( const BYTE* pbSrc, DWORD dwSrcSize, DWORD* pdwRead
 	if( p != m_UCSToGaijiTable + _countof(m_UCSToGaijiTable) && p->first == code ){
 		//追加記号集合として処理
 		AddGaijiToString((BYTE)(p->second >> 8), (BYTE)p->second);
-	}else{
-		if( code >= 0x10000 ){
-			//サロゲートペア
-			m_strDecode += (WCHAR)((code - 0x10000) / 0x400 + 0xD800);
-			m_strDecode += (WCHAR)((code - 0x10000) % 0x400 + 0xDC00);
-		}else{
-			m_strDecode += (WCHAR)code;
-		}
+		m_bSpacing = TRUE;
+	}else if( code >= 0x10000 ){
+		//サロゲートペア
+		AddDecodedCharacters((WCHAR)((code - 0x10000) / 0x400 + 0xD800),
+		                     (WCHAR)((code - 0x10000) % 0x400 + 0xDC00));
 		ActivePositionForward(1);
+		m_bSpacing = TRUE;
+	}else if( code == 0x0301 || code == 0x0300 || code == 0x0308 || code == 0x0302 ||
+	          code == 0x0305 || code == 0x0332 || code == 0x20DD ){
+		//ノンスペーシング文字「´｀¨＾￣＿◯」
+		m_strPending += (WCHAR)code;
+		m_bSpacing = FALSE;
+	}else{
+		AddDecodedCharacters((WCHAR)code);
+		ActivePositionForward(1);
+		m_bSpacing = TRUE;
 	}
 
-	m_bSpacing = TRUE;
 	return TRUE;
 }
 
@@ -929,8 +955,7 @@ void CARIB8CharDecode::AddGaijiToString( const BYTE bFirst, const BYTE bSecond )
 	}else{
 		pszSrc = L"・";
 	}
-	wchar_t szDest[3] = { pszSrc[0], pszSrc[1], L'\0' };
-	m_strDecode += szDest;
+	AddDecodedCharacters(pszSrc[0], pszSrc[1]);
 
 	//文字列に置換するときは文字数を指定
 	ActivePositionForward(1);
@@ -943,9 +968,9 @@ void CARIB8CharDecode::AddSJISToString( unsigned char ucFirst, unsigned char ucS
 	wchar_t szDest[3];
 	int nSize = MultiByteToWideChar(932, 0, (char*)szSrc, -1, szDest, 3);
 	if( nSize <= 1 ){
-		m_strDecode += L'・';
+		AddDecodedCharacters(L'・');
 	}else{
-		m_strDecode += szDest;
+		AddDecodedCharacters(szDest[0], szDest[1]);
 	}
 	ActivePositionForward(1);
 }
@@ -1363,6 +1388,16 @@ const BOOL CARIB8CharDecode::IsCaptionPropertyChanged(void) const
 	return FALSE;
 }
 
+void CARIB8CharDecode::AddDecodedCharacters( WCHAR cFirst, WCHAR cSecond )
+{
+	m_strDecode += cFirst;
+	if( cSecond ){
+		m_strDecode += cSecond;
+	}
+	//保留中のノンスペーシング文字列があれば後置する
+	m_strDecode += m_strPending;
+}
+
 //動作位置前進する
 void CARIB8CharDecode::ActivePositionForward( int nCount )
 {
@@ -1472,20 +1507,20 @@ BOOL CARIB8CharDecode::DRCSHeaderparse( const BYTE* pbSrc, DWORD dwSrcSize, vect
 			drcs.wDRCCode = wDRCCode;
 			drcs.wGradation = bDepth + 2;
 
-			DWORD dwSizeImage = 0;
+			drcs.Bitmap.reserve(((bWidth + 1) / 2 + 3) / 4 * 4 * bHeight);
 			//ビットマップの仕様により左下から走査
 			for( int y=bHeight-1; y>=0; y-- ){
 				for( int x=0; x<bWidth; x++ ){
 					int nPix = bDepth==0 ? GET_PIXEL_1(pbSrc+dwRead, y*bWidth+x) * 3 :
 					                       GET_PIXEL_2(pbSrc+dwRead, y*bWidth+x);
 					if( x%2==0 ){
-						drcs.bBitmap[dwSizeImage++] = (BYTE)(nPix<<4);
+						drcs.Bitmap.push_back((BYTE)(nPix << 4));
 					}else{
-						drcs.bBitmap[dwSizeImage-1] |= (BYTE)nPix;
+						drcs.Bitmap.back() |= (BYTE)nPix;
 					}
 				}
 				//ビットマップの仕様によりストライドを4バイト境界にする
-				dwSizeImage = (dwSizeImage + 3) / 4 * 4;
+				drcs.Bitmap.resize((drcs.Bitmap.size() + 3) / 4 * 4, 0);
 			}
 			BITMAPINFOHEADER bmiHeader = {0};
 			bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -1494,11 +1529,123 @@ BOOL CARIB8CharDecode::DRCSHeaderparse( const BYTE* pbSrc, DWORD dwSrcSize, vect
 			bmiHeader.biPlanes = 1;
 			bmiHeader.biBitCount = 4;
 			bmiHeader.biCompression = BI_RGB;
-			bmiHeader.biSizeImage = dwSizeImage;
+			bmiHeader.biSizeImage = (DWORD)drcs.Bitmap.size();
 			drcs.bmiHeader = bmiHeader;
 
 			dwRead += (bHeight*bWidth+bPixPerByte-1) / bPixPerByte;
 		}
+	}
+	return TRUE;
+}
+
+BOOL CARIB8CharDecode::ParseBitmapData(const BYTE* pbSrc, DWORD dwSrcSize, int* pPosX, int* pPosY,
+                                       vector<CLUT_DAT_DLL>* pFlushColor, vector<BYTE>* pImage)
+{
+	if( pbSrc == NULL || dwSrcSize < 5 || pPosX == NULL || pPosY == NULL || pFlushColor == NULL || pImage == NULL ){
+		return FALSE;
+	}
+	*pPosX = (pbSrc[0] << 8) | pbSrc[1];
+	*pPosY = (pbSrc[2] << 8) | pbSrc[3];
+	if( *pPosX > 0x7FFF ){
+		*pPosX -= 0x10000;
+	}
+	if( *pPosY > 0x7FFF ){
+		*pPosY -= 0x10000;
+	}
+	BYTE bFlushColorCount = pbSrc[4];
+	if( dwSrcSize < (DWORD)(5 + bFlushColorCount + 33) ){
+		return FALSE;
+	}
+	DWORD dwBitmapSize = dwSrcSize - 5 - bFlushColorCount;
+	const BYTE* pbBitmap = pbSrc + (dwSrcSize - dwBitmapSize);
+	if( memcmp(pbBitmap, "\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR", 16) != 0 ||
+	    pbBitmap[16] || pbBitmap[17] || (pbBitmap[18] & 0xF0) ||
+	    pbBitmap[20] || pbBitmap[21] || (pbBitmap[22] & 0xF0) ||
+	    (pbBitmap[24] != 1 && pbBitmap[24] != 2 && pbBitmap[24] != 4 && pbBitmap[24] != 8) || pbBitmap[25] != 3 ){
+		//幅と高さが4096未満かつパレット指定のビット深度8までのPNGデータ以外は未対応
+		return FALSE;
+	}
+	for( DWORD i = 33; i + 7 < dwBitmapSize; ){
+		if( pbBitmap[i] || pbBitmap[i + 1] || memcmp(pbBitmap + i + 4, "PLTE", 4) == 0 ){
+			//パレットを省略していないものは未対応
+			return FALSE;
+		}
+		i += ((pbBitmap[i + 2] << 8) | pbBitmap[i + 3]) + 12;
+	}
+
+	pFlushColor->reserve(bFlushColorCount);
+	pFlushColor->clear();
+	for( BYTE i = 0; i < bFlushColorCount; i++ ){
+		if( pbSrc[5 + i] < _countof(DefClut) ){
+			pFlushColor->push_back(DefClut[pbSrc[5 + i]]);
+		}
+	}
+	pImage->reserve(dwBitmapSize + 12 + 12 + 4 * _countof(DefClut));
+	pImage->assign(pbBitmap, pbBitmap + 33);
+
+	//運用規定によりパレットは固定色
+	DWORD dwClutSize = _countof(DefClut);
+	pImage->push_back(0);
+	pImage->push_back(0);
+	pImage->push_back((BYTE)((3 * dwClutSize) >> 8));
+	pImage->push_back((BYTE)(3 * dwClutSize));
+	pImage->push_back('P');
+	pImage->push_back('L');
+	pImage->push_back('T');
+	pImage->push_back('E');
+	for( DWORD i = 0; i < dwClutSize; i++ ){
+		pImage->push_back(DefClut[i].ucR);
+		pImage->push_back(DefClut[i].ucG);
+		pImage->push_back(DefClut[i].ucB);
+	}
+	//事前計算のCRCを埋め込む
+	pImage->push_back(0x91);
+	pImage->push_back(0xFB);
+	pImage->push_back(0x1F);
+	pImage->push_back(0xA7);
+
+	pImage->push_back(0);
+	pImage->push_back(0);
+	pImage->push_back((BYTE)(dwClutSize >> 8));
+	pImage->push_back((BYTE)dwClutSize);
+	pImage->push_back('t');
+	pImage->push_back('R');
+	pImage->push_back('N');
+	pImage->push_back('S');
+	for( DWORD i = 0; i < dwClutSize; i++ ){
+		pImage->push_back(DefClut[i].ucAlpha);
+	}
+	pImage->push_back(0xCE);
+	pImage->push_back(0xB6);
+	pImage->push_back(0xB1);
+	pImage->push_back(0x6C);
+
+	pImage->insert(pImage->end(), pbBitmap + 33, pbBitmap + dwBitmapSize);
+	return TRUE;
+}
+
+BOOL CARIB8CharDecode::GetDisplayAreaFromSWFMode(WORD* pwClientW, WORD* pwClientH, WORD wSWFMode)
+{
+	if( pwClientW == NULL || pwClientH == NULL ){
+		return FALSE;
+	}
+	switch(wSWFMode){
+	case 7:
+	case 8:
+		*pwClientW = 960;
+		*pwClientH = 540;
+		break;
+	case 9:
+	case 10:
+		*pwClientW = 720;
+		*pwClientH = 480;
+		break;
+	case 14:
+		*pwClientW = 320;
+		*pwClientH = 180;
+		break;
+	default:
+		return FALSE;
 	}
 	return TRUE;
 }

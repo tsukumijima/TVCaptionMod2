@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <tchar.h>
+#include "../Caption_src/CaptionDef.h"
 
 #ifdef _DEBUG
 #define DEBUG_OUT(x) ::OutputDebugString(x)
@@ -23,7 +24,8 @@ BOOL WritePrivateProfileInt(LPCTSTR lpAppName, LPCTSTR lpKeyName, int value, LPC
 DWORD GetLongModuleFileName(HMODULE hModule, LPTSTR lpFileName, DWORD nSize);
 bool IsWindows7OrLater();
 std::vector<WCHAR> ReadTextFileToEnd(LPCTSTR fileName, DWORD dwShareMode);
-int StrlenWoLoSurrogate(LPCTSTR str);
+bool IsNonSpacingCharacter(TCHAR c);
+int StrlenWoLoSurrogateOrNonSpacing(LPCTSTR str);
 bool HexStringToByteArray(LPCTSTR str, BYTE *pDest, int destLen);
 void AddToComboBoxList(HWND hDlg, int id, const LPCTSTR *pList);
 void AddFaceNameToComboBoxList(HWND hDlg, int id);
@@ -145,12 +147,14 @@ bool BrowseFolderDialog(HWND hwndOwner, TCHAR (&szDirectory)[MAX_PATH], LPCTSTR 
 
 bool SaveImageAsBmp(LPCTSTR fileName, const BITMAPINFOHEADER &bih, const void *pBits);
 bool SaveImageAsPngOrJpeg(HMODULE hTVTestImage, LPCTSTR fileName, bool pngOrJpeg, int compressionLevelOrQuality, const BITMAPINFOHEADER &bih, const void *pBits);
+HBITMAP LoadAribPngAsDIBSection(HMODULE hTVTestImage, const BYTE *pPngData, size_t dataSize, void **ppBits, RECT *pCropRect = nullptr);
+HBITMAP CopyDIBSectionWithTransparency(HBITMAP hbmSrc, const CLUT_DAT_DLL *pTransparentColorList, size_t colorLen, void **ppBits);
+
+bool StretchDrawBitmap(HDC hdc, int x, int y, int width, int height, HBITMAP hbm, int stretchMode = STRETCH_HALFTONE, int halfSizeStretchMode = 0);
 
 namespace DrawUtil {
 
 bool Fill(HDC hdc,const RECT *pRect,COLORREF Color);
-bool DrawBitmap(HDC hdc,int DstX,int DstY,int DstWidth,int DstHeight,
-				HBITMAP hbm,const RECT *pSrcRect=nullptr,BYTE Opacity=255);
 
 }	// namespace DrawUtil
 

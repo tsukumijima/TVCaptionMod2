@@ -114,11 +114,18 @@ std::vector<WCHAR> ReadTextFileToEnd(LPCTSTR fileName, DWORD dwShareMode)
     return ret;
 }
 
-int StrlenWoLoSurrogate(LPCTSTR str)
+bool IsNonSpacingCharacter(TCHAR c)
+{
+    // 「´｀¨＾￣＿◯」の結合文字
+    return c == 0x0301 || c == 0x0300 || c == 0x0308 || c == 0x0302 ||
+           c == 0x0305 || c == 0x0332 || c == 0x20DD;
+}
+
+int StrlenWoLoSurrogateOrNonSpacing(LPCTSTR str)
 {
     int len = 0;
     for (; *str; ++str) {
-        if ((*str & 0xFC00) != 0xDC00) ++len;
+        if ((*str & 0xFC00) != 0xDC00 && !IsNonSpacingCharacter(*str)) ++len;
     }
     return len;
 }
@@ -516,6 +523,106 @@ bool SaveImageAsPngOrJpeg(HMODULE hTVTestImage, LPCTSTR fileName, bool pngOrJpeg
     return false;
 }
 
+HBITMAP LoadAribPngAsDIBSection(HMODULE hTVTestImage, const BYTE *pPngData, size_t dataSize, void **ppBits, RECT *pCropRect)
+{
+    HBITMAP hbm = nullptr;
+    HGLOBAL (WINAPI *pfnLoadAribPngFromMemory)(const void *, SIZE_T) =
+        reinterpret_cast<HGLOBAL (WINAPI *)(const void *, SIZE_T)>(::GetProcAddress(hTVTestImage, "LoadAribPngFromMemory"));
+    if (pfnLoadAribPngFromMemory) {
+        HGLOBAL hDIB = pfnLoadAribPngFromMemory(pPngData, dataSize);
+        if (hDIB) {
+            // 中身は常に32ビットDIB
+            BITMAPINFO *pbmi = static_cast<BITMAPINFO *>(::GlobalLock(hDIB));
+            if (pbmi) {
+                BITMAPINFOHEADER bmih = pbmi->bmiHeader;
+                if (pCropRect) {
+                    bmih.biWidth = min(max(bmih.biWidth - pCropRect->left, 0), pCropRect->right - pCropRect->left);
+                    bmih.biHeight = min(max(bmih.biHeight - pCropRect->top, 0), pCropRect->bottom - pCropRect->top);
+                }
+                if (bmih.biBitCount == 32 && bmih.biWidth > 0 && bmih.biHeight > 0) {
+                    hbm = ::CreateDIBSection(nullptr, reinterpret_cast<BITMAPINFO *>(&bmih), DIB_RGB_COLORS, ppBits, nullptr, 0);
+                    if (hbm) {
+                        DWORD *pdwBits = static_cast<DWORD *>(*ppBits);
+                        DWORD *pdwSrcBits = reinterpret_cast<DWORD *>(pbmi->bmiColors);
+                        if (bmih.biWidth == pbmi->bmiHeader.biWidth && bmih.biHeight == pbmi->bmiHeader.biHeight) {
+                            ::memcpy(pdwBits, pdwSrcBits, bmih.biWidth * bmih.biHeight * 4);
+                        }
+                        else {
+                            pdwSrcBits += pbmi->bmiHeader.biWidth * (pbmi->bmiHeader.biHeight - bmih.biHeight - pCropRect->top) + pCropRect->left;
+                            for (int y = 0; y < bmih.biHeight; ++y) {
+                                ::memcpy(pdwBits, pdwSrcBits, bmih.biWidth * 4);
+                                pdwBits += bmih.biWidth;
+                                pdwSrcBits += pbmi->bmiHeader.biWidth;
+                            }
+                        }
+                    }
+                }
+                ::GlobalUnlock(hDIB);
+            }
+            ::GlobalFree(hDIB);
+        }
+    }
+    return hbm;
+}
+
+HBITMAP CopyDIBSectionWithTransparency(HBITMAP hbmSrc, const CLUT_DAT_DLL *pTransparentColorList, size_t colorLen, void **ppBits)
+{
+    // 32ビットDIBであること
+    BITMAP bm;
+    if (::GetObject(hbmSrc, sizeof(BITMAP), &bm) && bm.bmBitsPixel == 32 && bm.bmWidthBytes % 4 == 0) {
+        BITMAPINFOHEADER bmih = {};
+        bmih.biSize = sizeof(BITMAPINFOHEADER);
+        bmih.biWidth = bm.bmWidth;
+        bmih.biHeight = bm.bmHeight;
+        bmih.biPlanes = 1;
+        bmih.biBitCount = 32;
+        bmih.biCompression = BI_RGB;
+        HBITMAP hbm = ::CreateDIBSection(nullptr, reinterpret_cast<BITMAPINFO *>(&bmih), DIB_RGB_COLORS, ppBits, nullptr, 0);
+        if (hbm) {
+            DWORD *pdwBits = static_cast<DWORD *>(*ppBits);
+            DWORD *pdwSrcBits = static_cast<DWORD *>(bm.bmBits);
+            for (int y = 0; y < bmih.biHeight; ++y) {
+                for (int x = 0; x < bmih.biWidth; ++x) {
+                    DWORD c = pdwSrcBits[x];
+                    for (size_t i = 0; i < colorLen; ++i) {
+                        CLUT_DAT_DLL t = pTransparentColorList[i];
+                        if (t.ucB == (c & 0xFF) && t.ucG == (c >> 8 & 0xFF) && t.ucR == (c >> 16 & 0xFF) && t.ucAlpha == (c >> 24)) {
+                            c = 0;
+                            break;
+                        }
+                    }
+                    pdwBits[x] = c;
+                }
+                pdwBits += bmih.biWidth;
+                pdwSrcBits += bm.bmWidthBytes / 4;
+            }
+            return hbm;
+        }
+    }
+    return nullptr;
+}
+
+bool StretchDrawBitmap(HDC hdc, int x, int y, int width, int height, HBITMAP hbm, int stretchMode, int halfSizeStretchMode)
+{
+    BITMAP bm;
+    if (::GetObject(hbm, sizeof(BITMAP), &bm)) {
+        HDC hdcSrc = ::CreateCompatibleDC(hdc);
+        if (hdcSrc) {
+            HBITMAP hbmOld = static_cast<HBITMAP>(::SelectObject(hdcSrc, hbm));
+            int oldStretchMode = ::SetStretchBltMode(hdc,
+                bm.bmWidth == width && bm.bmHeight == height ? STRETCH_DELETESCANS :
+                (bm.bmWidth == width || bm.bmWidth == width * 2) &&
+                (bm.bmHeight == height || bm.bmHeight == height * 2) && halfSizeStretchMode ? halfSizeStretchMode : stretchMode);
+            bool fRet = !!::StretchBlt(hdc, x, y, width, height, hdcSrc, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+            ::SetStretchBltMode(hdc, oldStretchMode);
+            ::SelectObject(hdcSrc, hbmOld);
+            ::DeleteDC(hdcSrc);
+            return fRet;
+        }
+    }
+    return false;
+}
+
 #if 1 // From: TVTest_0.7.23_Src/DrawUtil.cpp
 
 namespace DrawUtil {
@@ -529,54 +636,6 @@ bool Fill(HDC hdc,const RECT *pRect,COLORREF Color)
 		return false;
 	::FillRect(hdc,pRect,hbr);
 	::DeleteObject(hbr);
-	return true;
-}
-
-// ビットマップを描画する
-bool DrawBitmap(HDC hdc,int DstX,int DstY,int DstWidth,int DstHeight,
-				HBITMAP hbm,const RECT *pSrcRect,BYTE Opacity)
-{
-	if (!hdc || !hbm)
-		return false;
-
-	int SrcX,SrcY,SrcWidth,SrcHeight;
-	if (pSrcRect) {
-		SrcX=pSrcRect->left;
-		SrcY=pSrcRect->top;
-		SrcWidth=pSrcRect->right-pSrcRect->left;
-		SrcHeight=pSrcRect->bottom-pSrcRect->top;
-	} else {
-		BITMAP bm;
-		if (::GetObject(hbm,sizeof(BITMAP),&bm)!=sizeof(BITMAP))
-			return false;
-		SrcX=SrcY=0;
-		SrcWidth=bm.bmWidth;
-		SrcHeight=bm.bmHeight;
-	}
-
-	HDC hdcMemory=::CreateCompatibleDC(hdc);
-	if (!hdcMemory)
-		return false;
-	HBITMAP hbmOld=static_cast<HBITMAP>(::SelectObject(hdcMemory,hbm));
-
-	if (Opacity==255) {
-		if (SrcWidth==DstWidth && SrcHeight==DstHeight) {
-			::BitBlt(hdc,DstX,DstY,DstWidth,DstHeight,
-					 hdcMemory,SrcX,SrcY,SRCCOPY);
-		} else {
-			int OldStretchMode=::SetStretchBltMode(hdc,STRETCH_HALFTONE);
-			::StretchBlt(hdc,DstX,DstY,DstWidth,DstHeight,
-						 hdcMemory,SrcX,SrcY,SrcWidth,SrcHeight,SRCCOPY);
-			::SetStretchBltMode(hdc,OldStretchMode);
-		}
-	} else {
-		BLENDFUNCTION bf={AC_SRC_OVER,0,Opacity,0};
-		::GdiAlphaBlend(hdc,DstX,DstY,DstWidth,DstHeight,
-						hdcMemory,SrcX,SrcY,SrcWidth,SrcHeight,bf);
-	}
-
-	::SelectObject(hdcMemory,hbmOld);
-	::DeleteDC(hdcMemory);
 	return true;
 }
 
